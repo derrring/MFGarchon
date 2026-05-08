@@ -2516,27 +2516,41 @@ class HJBGFDMSolver(BaseHJBSolver):
             if use_hamiltonian_batch:
                 g_u, l_u = self._compute_derivatives_vectorized(u_trial)
                 r = self._compute_hjb_residual_hamiltonian(
-                    u_trial, u_n_plus_1, m_n_plus_1, g_u, l_u, H_class,
-                    current_time, running_cost=running_cost,
+                    u_trial,
+                    u_n_plus_1,
+                    m_n_plus_1,
+                    g_u,
+                    l_u,
+                    H_class,
+                    current_time,
+                    running_cost=running_cost,
                 )
             elif use_legacy_vectorized:
                 g_u, l_u = self._compute_derivatives_vectorized(u_trial)
                 r = self._compute_hjb_residual_vectorized(
-                    u_trial, u_n_plus_1, m_n_plus_1, g_u, l_u,
+                    u_trial,
+                    u_n_plus_1,
+                    m_n_plus_1,
+                    g_u,
+                    l_u,
                     running_cost=running_cost,
                 )
             else:
                 derivs = self._approximate_all_derivatives_cached(u_trial)
                 r = self._compute_hjb_residual_with_cache(
-                    u_trial, u_n_plus_1, m_n_plus_1, time_idx, derivs,
+                    u_trial,
+                    u_n_plus_1,
+                    m_n_plus_1,
+                    time_idx,
+                    derivs,
                     running_cost=running_cost,
                 )
             return float(np.linalg.norm(r))
 
         # Armijo backtracking parameters (Nocedal-Wright §3.1)
-        ARMIJO_C1 = 1e-4       # sufficient-decrease constant
+        ARMIJO_C1 = 1e-4  # sufficient-decrease constant
         BACKTRACK_FACTOR = 0.5  # geometric step reduction
-        MIN_ALPHA = 1e-6       # give up below this α
+        MIN_ALPHA = 1e-6  # give up below this α
 
         for _newton_iter in range(self.max_newton_iterations):
             if use_hamiltonian_batch:
