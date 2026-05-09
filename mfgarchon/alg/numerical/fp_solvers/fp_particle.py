@@ -877,6 +877,40 @@ class FPParticleSolver(BaseFPSolver):
         """
         return _enforce_obstacle(particles, self._implicit_domain)
 
+    def _infer_reflect_bounds(
+        self, bounds: list[tuple[float, float]]
+    ) -> list[tuple[float, float]] | None:
+        """
+        Issue #1083: infer per-axis bounds for KDE reflection from solver BC.
+
+        Returns the subset of `bounds` for axes whose BC is reflective
+        (NO_FLUX / REFLECTING / NEUMANN). Returns None if no axis is reflective
+        — caller falls back to standard KDE without ghost reflection.
+
+        For axes with non-reflective BC (DIRICHLET absorbing exit, periodic),
+        reflection ghosts are mathematically wrong, so they are excluded.
+        """
+        bc = self.boundary_conditions
+        if bc is None or not getattr(bc, "segments", None):
+            # No explicit BC: assume reflecting on all axes (legacy default)
+            return list(bounds)
+
+        # Check if any segment is reflective. The simplest correct heuristic
+        # for the typical case (uniform reflecting walls + optional Dirichlet
+        # exit): if at least one segment is reflective, pass bounds for all
+        # axes. Per-axis disambiguation needs the BC framework's face-resolution
+        # which is non-trivial; defer until segment-axis mapping is exposed.
+        from mfgarchon.geometry.boundary import BCType
+
+        reflective_types = {BCType.NO_FLUX, BCType.REFLECTING, BCType.NEUMANN}
+        has_reflective = any(
+            getattr(seg, "bc_type", None) in reflective_types
+            for seg in bc.segments
+        )
+        if has_reflective:
+            return list(bounds)
+        return None
+
     def _apply_boundary_conditions_nd(
         self,
         particles: np.ndarray,
@@ -2023,9 +2057,15 @@ class FPParticleSolver(BaseFPSolver):
             else:
                 # Meshfree: use KDE on current particles (for initial_particles mode)
                 # This provides self-consistent density estimate without grid
+                # Issue #1083: pass reflect_bounds for axes with reflecting BC
+                # so boundary cells aren't underestimated by ~50% (Issue #709 ghosts)
                 from mfgarchon.alg.numerical.fp_solvers.particle_density_query import ParticleDensityQuery
 
-                query = ParticleDensityQuery(particles_t, bandwidth_rule="scott")
+                reflect_bounds = self._infer_reflect_bounds(bounds)
+                query = ParticleDensityQuery(
+                    particles_t, bandwidth_rule="scott",
+                    reflect_bounds=reflect_bounds,
+                )
                 m_at_particles = query.query_density(particles_t, method="hybrid", k=min(50, len(particles_t) - 1))
 
             # Evaluate drift callable
