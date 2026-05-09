@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`HJBGFDMSolver` now emits a `UserWarning` when `monotonicity_scheme` is
+  unspecified** (Issue #1034). The default resolves to `"none"` (no QP
+  correction), producing bare Wendland-Taylor LSQ stencils whose M-matrix
+  structure is not enforced. On long-time-horizon problems (e.g. 1D
+  Towel-on-Beach at T=8) this destabilizes FP-Particle coupling and produces
+  catastrophic boundary oscillation. The warning surfaces the trap and points
+  users to `monotonicity_scheme='joint_socp'` (paper-canonical) or
+  `'qp_m_matrix'` (cheaper). Users intentionally using the bare scheme can
+  pass `monotonicity_scheme='none'` explicitly to suppress the warning.
+  Validated in
+  `mfg-research/.../exp08_towel_2d_validation/_preflight_1d/post_mortem_1d_tob_debug.md`.
+
 ## [0.19.6] - 2026-05-06
 
 ### Fixed
