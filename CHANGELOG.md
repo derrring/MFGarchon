@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CFL diagnostic logging now emits at INFO once per solver instance**, then
+  DEBUG on subsequent calls (Issue #1052). Previously every Picard iteration
+  emitted the same "CFL diagnostic" line at INFO, spamming user logs and
+  causing researchers to blanket-suppress warnings (which masked unrelated
+  DeprecationWarnings — the Tier-C silent-semantic-shift bugs in #1043 went
+  unnoticed for weeks partially for this reason). Applies to `HJBFDMSolver`
+  and `FPFDMSolver`.
+
+- **`SeparableHamiltonian.potential` docstring** now explicitly documents the
+  "potential as reward" sign convention (Issue #1057, gotcha G-001). For an
+  attractive potential at `x_c`, write `V(x, t) = -0.5*C*(x-x_c)**2`
+  (inverted parabola, peak at `x_c`); for repulsive, write `+0.5*C*(x-x_c)**2`
+  (bowl). This is opposite to standard MFG literature where V is "cost to
+  avoid"; mfgarchon's convention is reward, agents concentrate at V_max.
+
 ### Fixed
 
 - **`HJBSemiLagrangianSolver._stochastic_sl_step_1d` trio of fixes** (Issues
@@ -33,7 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `_stochastic_sl_step_nd` per the project's "dimension as parameter, not
   constraint" principle) is tracked separately as Issue #1050; this PR fixes
   the 1D path only.
-
+- **`FPParticleSolver._get_grid_params` now fails fast on geometries that
+  expose neither `.bounds`, `.xmin`/`.xmax`, nor `.coordinates`** (Issue #1053).
+  Previously fell through to a silent `[(0.0, 1.0)] * dimension` fallback
+  (the unit hypercube), which corrupted FP particle simulation on any
+  non-standard geometry without a clear error. Now raises `TypeError` with
+  a diagnostic pointing at the missing API.
 - **`FPParticleSolver._solve_fp_system_callable_drift` now honors segment-aware
   Dirichlet absorbing boundary conditions** (Issue #1042). Previously the
   callable-drift path always routed through `_apply_boundary_conditions_nd`

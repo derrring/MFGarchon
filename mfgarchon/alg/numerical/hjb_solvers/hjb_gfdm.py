@@ -504,11 +504,8 @@ class HJBGFDMSolver(BaseHJBSolver):
                 "always": ("qp_m_matrix", "always"),
                 "precompute": ("qp_m_matrix", "precompute"),
             }
-            if legacy in mapping:
-                scheme, application = mapping[legacy]
-            else:
-                # Unknown legacy value — pass through for solver-internal handling
-                scheme, application = "qp_m_matrix", legacy
+            # Unknown legacy value passes through for solver-internal handling.
+            scheme, application = mapping.get(legacy, ("qp_m_matrix", legacy))
 
         # Canonical storage
         self.monotonicity_scheme = scheme

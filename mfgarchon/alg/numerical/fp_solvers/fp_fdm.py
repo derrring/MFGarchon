@@ -233,14 +233,19 @@ class FPFDMSolver(BaseFPSolver):
     # _detect_dimension() inherited from BaseNumericalSolver (Issue #633)
 
     def _log_cfl_diagnostic(self, volatility_field: float | None = None) -> None:
-        """Log CFL diagnostic for accuracy/convergence guidance (Issue #882)."""
+        """Log CFL diagnostic for accuracy/convergence guidance (Issue #882, #1052).
+
+        Issue #1052: log once at INFO per solver instance, subsequent calls at
+        DEBUG. CFL parameters are static across Picard iterations.
+        """
         try:
             dt = self.problem.dt
             dx = self.problem.geometry.get_grid_spacing()[0]
             sigma = volatility_field if isinstance(volatility_field, (int, float)) else self.problem.sigma
             cfl_diffusive = sigma**2 * dt / dx**2
             if cfl_diffusive > 0.5:
-                logger.info(
+                log_fn = logger.debug if getattr(self, "_cfl_logged", False) else logger.info
+                log_fn(
                     "CFL diagnostic (FP FDM): diffusive=%.2f (sigma=%.3g, dt=%.3g, dx=%.3g). "
                     "Implicit scheme is stable but accuracy may degrade for CFL >> 1.",
                     cfl_diffusive,
@@ -248,6 +253,7 @@ class FPFDMSolver(BaseFPSolver):
                     dt,
                     dx,
                 )
+                self._cfl_logged = True
         except (AttributeError, IndexError, TypeError):
             pass  # Not enough info to compute CFL — skip silently
 

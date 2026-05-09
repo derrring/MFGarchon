@@ -1938,19 +1938,42 @@ class SeparableHamiltonian(HamiltonianBase):
 
     This is the most common form in MFG, where:
     - H_control(p): Control cost (from ControlCostBase)
-    - V(x, t): Potential energy / state cost
+    - V(x, t): Potential energy / state cost (see sign-convention note below)
     - f(m): Density coupling term
 
     The separability allows efficient computation and analytic derivatives.
+
+    Sign convention (Issue #1057, gotcha G-001)
+    -------------------------------------------
+    `potential` enters the Hamiltonian as ``H = H_control(p) + V(x, t) + f(m)``.
+    The class also accepts ``sense=OptimizationSense.MINIMIZE`` (default) which
+    flips the sign on ``H_control``'s Legendre-transform direction — but ``V`` is
+    currently added to ``H`` **without** a corresponding sense-flip. Empirically,
+    research code attracts density to ``x_c`` by writing ``V(x, t) = -C * (x - x_c)**2``
+    (inverted parabola, peak at ``x_c``), not the bowl shape that standard MFG
+    literature would suggest. This is the de-facto "potential as reward"
+    convention.
+
+    The API gap (V not interacting with ``sense``) is tracked as Issue #1060;
+    until that lands, the practical guidance is:
+
+    - **Attractive** potential at ``x_c``: ``V(x, t) = -0.5 * C * (x - x_c)**2``
+      (inverted parabola, peak at ``x_c``).
+    - **Repulsive** potential at ``x_c``: ``V(x, t) = +0.5 * C * (x - x_c)**2``
+      (bowl, minimum at ``x_c``).
+
+    Verified by exp08/09 Stage A/B/C runners — they attract density to ``x_c``
+    using ``-C₁ * (x - x_c)**2``.
 
     Parameters
     ----------
     control_cost : ControlCostBase
         Control cost specification (quadratic, L1, bounded, etc.)
     potential : Callable[[NDArray, float], float] | None
-        Potential function V(x, t). If None, V = 0.
+        Potential V(x, t) added to H. If None, V = 0. See "Sign convention" above —
+        write inverted parabola (peak at x_c) for attractive.
     coupling : Callable[[float | NDArray], float | NDArray] | None
-        Density coupling f(m). If None, f = 0.
+        Density coupling f(m). If None, f = 0. Same "added to H" convention.
     coupling_dm : Callable[[float | NDArray], float | NDArray] | None
         Derivative df/dm. If None, computed via finite differences.
 
