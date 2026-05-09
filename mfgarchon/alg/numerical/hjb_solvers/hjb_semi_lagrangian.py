@@ -201,14 +201,28 @@ class HJBSemiLagrangianSolver(BaseHJBSolver):
         self.gradient_clip_threshold = gradient_clip_threshold
         self.enable_gradient_monitoring = enable_gradient_monitoring
 
-        # Issue #1026: Carlini-Silva stochastic SL requires >=2nd-order interpolation.
-        # Linear interpolation caps global error at O(h), defeating the purpose.
-        if self.diffusion_method == "stochastic" and self.interpolation_method == "linear":
-            raise ValueError(
-                "diffusion_method='stochastic' requires cubic or higher-order "
-                "interpolation. Linear interpolation produces O(h) global error, "
-                "incompatible with the Carlini-Silva 2014 second-order scheme. "
-                "Set interpolation_method='cubic' (or 'quintic' for nD)."
+        # Issue #1049: Carlini-Silva 2014 prove unconditional stability of the
+        # deterministic 2-direction averaging SL scheme (here: diffusion_method=
+        # "stochastic") **specifically for Q1 (linear, monotone) interpolation**.
+        # Cubic interpolation is not covered by the CS 2014 proof and is non-monotone
+        # (Issue #1033 documents the exponential blow-up on Towel-on-Beach).
+        # The previous validation actively rejected the proof-applicable combination.
+        # Now: warn (don't reject) when cubic+stochastic is selected, since that
+        # combination violates the monotone-scheme requirement of CS 2014.
+        if self.diffusion_method == "stochastic" and self.interpolation_method in ("cubic", "quintic"):
+            import warnings
+
+            warnings.warn(
+                f"diffusion_method='stochastic' with interpolation_method='{self.interpolation_method}' "
+                "is NOT covered by the Carlini-Silva 2014 stability proof, which "
+                "requires monotone (Q1/linear) interpolation. Cubic/quintic can "
+                "violate the monotone-scheme requirement of Barles-Souganidis and "
+                "produce exponential blow-up on stiff problems (see Issue #1033). "
+                "Recommended: interpolation_method='linear'. mfgarchon's cubic "
+                "path now uses `PchipInterpolator` (monotonic Hermite) which is "
+                "more stable than `CubicSpline` but still outside the formal proof.",
+                UserWarning,
+                stacklevel=2,
             )
 
         # Gradient clipping statistics tracking
@@ -1287,18 +1301,14 @@ class HJBSemiLagrangianSolver(BaseHJBSolver):
         Returns:
             Value function at current time step, same shape as U_next.
 
-        Raises:
-            ValueError: if interpolation_method is "linear" (validated in
-                __init__, but check is also enforced here defensively).
+        Notes:
+            Issue #1049: previously rejected interpolation_method="linear" here,
+            inverted from CS 2014's stability requirement. The "linear" path is
+            now allowed; warning issued at __init__ when cubic/quintic is used
+            with stochastic (the unproven combination).
         """
         if dt is None:
             dt = self.dt
-        if self.interpolation_method == "linear":
-            raise ValueError(
-                "Stochastic SL with linear interpolation has O(h) global "
-                "error and is incompatible with the Carlini-Silva 2014 "
-                "scheme. Set interpolation_method='cubic' (or 'quintic')."
-            )
 
         if self.dimension == 1:
             return self._stochastic_sl_step_1d(U_next, M_next, time_idx, dt)
@@ -1313,8 +1323,6 @@ class HJBSemiLagrangianSolver(BaseHJBSolver):
         dt: float,
     ) -> np.ndarray:
         """1D stochastic SL step. See _solve_timestep_stochastic_sl."""
-        from scipy.interpolate import CubicSpline
-
         Nx = len(U_next)
         sigma = self.problem.sigma  # SDE volatility (Sigma in mfg_problem.py:39)
         sqrt_dt = float(np.sqrt(dt))
@@ -1329,24 +1337,48 @@ class HJBSemiLagrangianSolver(BaseHJBSolver):
         y_plus = x_drift + diffusion_offset
         y_minus = x_drift - diffusion_offset
 
-        # Boundary handling - same as the Strang-splitting branch
+        # Boundary handling — Issue #1048 fix: properly REFLECT characteristic feet
+        # for Neumann BC instead of clamping. Clamping collapsed all out-of-bounds
+        # feet onto the boundary node, biasing toward the wall value and breaking
+        # upwind property near the boundary.
         bc = self.get_boundary_conditions()
         bc_type_str = get_bc_type_string(bc)
         bc_op = bc_type_to_geometric_operation(bc_type_str)
         bounds = self.problem.geometry.get_bounds()
         xmin, xmax = bounds[0][0], bounds[1][0]
         if bc_op == "reflect":
-            y_plus = np.clip(y_plus, xmin, xmax)
-            y_minus = np.clip(y_minus, xmin, xmax)
+            # Iterated mirror reflection via modular arithmetic:
+            #   y' = xmin + |((y − xmin) mod 2L) − L|   where L = xmax − xmin
+            # Maps any y ∈ ℝ to [xmin, xmax] via reflections at xmin and xmax.
+            # Handles arbitrary numbers of bounces in a single expression.
+            L = xmax - xmin
+            y_plus = xmin + np.abs(((y_plus - xmin) % (2 * L)) - L)
+            y_minus = xmin + np.abs(((y_minus - xmin) % (2 * L)) - L)
         elif bc_op == "wrap":
             L = xmax - xmin
             y_plus = xmin + (y_plus - xmin) % L
             y_minus = xmin + (y_minus - xmin) % L
 
-        # Cubic spline interpolation at both stochastic departures
-        interp_fn = CubicSpline(self.x_grid, U_next, bc_type="not-a-knot")
-        u_plus = interp_fn(y_plus)
-        u_minus = interp_fn(y_minus)
+        # Issue #1033 + #1049: dispatch interpolation by configured method.
+        # - "linear": canonical Carlini-Silva 2014 (Q1, monotone, proof applies)
+        # - "cubic":  monotone-preserving Hermite (PchipInterpolator) — replaces
+        #             non-monotone CubicSpline that blew up on stiff problems
+        # - "quintic": fall back to PchipInterpolator (cubic, monotone) here in 1D;
+        #             user gets the warning at __init__ that this is outside the proof.
+        if self.interpolation_method == "linear":
+            u_plus = np.interp(y_plus, self.x_grid, U_next)
+            u_minus = np.interp(y_minus, self.x_grid, U_next)
+        else:
+            # Issue #1033 fix: PchipInterpolator (monotone Hermite) replaces
+            # CubicSpline (non-monotone, blew up on stiff problems). The reflect/
+            # wrap branch above keeps all feet inside [xmin, xmax], so disabling
+            # extrapolation is safe — any out-of-range query indicates a real bug
+            # upstream and should propagate as nan, not be silently masked.
+            from scipy.interpolate import PchipInterpolator
+
+            interp_fn = PchipInterpolator(self.x_grid, U_next, extrapolate=False)
+            u_plus = interp_fn(y_plus)
+            u_minus = interp_fn(y_minus)
 
         # CS update: average over Brownian directions, subtract dt*H
         u_avg = 0.5 * (u_plus + u_minus)

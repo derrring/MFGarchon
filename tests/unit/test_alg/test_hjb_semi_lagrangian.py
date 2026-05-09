@@ -732,8 +732,15 @@ class TestStochasticCharacteristicSL:
     minors/archive/exp14_towel_1d_benchmark/subs/exp14e_solver_comparison/
     """
 
-    def test_linear_plus_stochastic_rejected(self):
-        """Linear interpolation caps global error at O(h); incompatible with CS."""
+    def test_linear_plus_stochastic_accepted(self):
+        """Issue #1049: linear+stochastic IS the canonical Carlini-Silva 2014 scheme.
+
+        Previously rejected by validation (`test_linear_plus_stochastic_rejected`).
+        That validation was inverted from CS 2014's stability requirement: the
+        rejected combination IS the proven-stable canonical scheme, while the
+        forced cubic combination is non-monotone (Issue #1033). Test renamed and
+        inverted to assert the corrected behavior.
+        """
         geometry = TensorProductGrid(
             bounds=[(0.0, 1.0)],
             Nx_points=[51],
@@ -741,29 +748,37 @@ class TestStochasticCharacteristicSL:
         )
         problem = MFGProblem(geometry=geometry, T=1.0, Nt=50, components=_default_components())
 
-        with pytest.raises(ValueError, match="cubic or higher-order"):
-            HJBSemiLagrangianSolver(
-                problem,
-                interpolation_method="linear",
-                diffusion_method="stochastic",
-            )
-
-    def test_cubic_plus_stochastic_instantiates(self):
-        """Cubic + stochastic is the supported configuration."""
-        geometry = TensorProductGrid(
-            bounds=[(0.0, 1.0)],
-            Nx_points=[51],
-            boundary_conditions=no_flux_bc(dimension=1),
-        )
-        problem = MFGProblem(geometry=geometry, T=1.0, Nt=50, components=_default_components())
-
+        # Should NOT raise — linear+stochastic is now allowed and recommended.
         solver = HJBSemiLagrangianSolver(
             problem,
-            interpolation_method="cubic",
+            interpolation_method="linear",
             diffusion_method="stochastic",
-            check_cfl=False,
         )
+        assert solver.diffusion_method == "stochastic"
+        assert solver.interpolation_method == "linear"
 
+    def test_cubic_plus_stochastic_warns(self):
+        """Issue #1049: cubic+stochastic emits a UserWarning (CS 2014 proof doesn't apply)."""
+        import warnings as _w
+
+        geometry = TensorProductGrid(
+            bounds=[(0.0, 1.0)],
+            Nx_points=[51],
+            boundary_conditions=no_flux_bc(dimension=1),
+        )
+        problem = MFGProblem(geometry=geometry, T=1.0, Nt=50, components=_default_components())
+
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            solver = HJBSemiLagrangianSolver(
+                problem,
+                interpolation_method="cubic",
+                diffusion_method="stochastic",
+                check_cfl=False,
+            )
+            cs_warnings = [m for m in caught if "Carlini-Silva" in str(m.message)]
+
+        assert len(cs_warnings) == 1, f"expected 1 CS UserWarning, got {len(cs_warnings)}"
         assert solver.diffusion_method == "stochastic"
         assert solver.interpolation_method == "cubic"
 

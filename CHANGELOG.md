@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`HJBSemiLagrangianSolver._stochastic_sl_step_1d` trio of fixes** (Issues
+  #1033, #1048, #1049):
+  1. **#1033**: replace `scipy.interpolate.CubicSpline` (non-monotone, blew up
+     on stiff problems with `max|∇u|` exponential growth 6 → 100 → 10⁶ → NaN
+     on 1D Towel-on-Beach in 17 Picard iters) with `PchipInterpolator`
+     (monotone Hermite). Linear interpolation now uses `np.interp` directly
+     when `interpolation_method="linear"`.
+  2. **#1048**: replace `np.clip(y, xmin, xmax)` boundary handling with
+     iterated mirror reflection `xmin + |((y − xmin) mod 2L) − L|`. Clamping
+     collapsed all out-of-bounds characteristic feet onto the boundary node,
+     biasing toward wall values and breaking upwind property near reflective
+     boundaries. Reflection matches the underlying SDE's behavior for Neumann.
+  3. **#1049**: remove the validation that **rejected** `interpolation_method
+     ="linear"` with `diffusion_method="stochastic"` — that combination IS the
+     proven-stable Carlini-Silva 2014 canonical scheme; the previously-required
+     `cubic` is non-monotone and outside the stability proof. Now `linear` is
+     the unwarned default for stochastic; cubic/quintic emit a `UserWarning`
+     pointing to the proof status.
+
+  See `mfg-research/docs/mfgarchon_gotchas.md` G-008 / G-009 / G-010 for the
+  research-side audit. The dim-agnostic refactor (unifying `_stochastic_sl_step_1d`
+  and `_stochastic_sl_step_nd` per the project's "dimension as parameter, not
+  constraint" principle) is tracked separately as Issue #1050; this PR fixes
+  the 1D path only.
+
 - **`FPParticleSolver._solve_fp_system_callable_drift` now honors segment-aware
   Dirichlet absorbing boundary conditions** (Issue #1042). Previously the
   callable-drift path always routed through `_apply_boundary_conditions_nd`
