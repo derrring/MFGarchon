@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Validated in
   `mfg-research/.../exp08_towel_2d_validation/_preflight_1d/post_mortem_1d_tob_debug.md`.
 
+### Changed
+
+- **Documented `HJBGFDMSolver.obstacle_sdf` sign convention** (Issue #1038).
+  Convention: ``obstacle_sdf(x) < 0`` means "x is INSIDE the obstacle (to be
+  filtered)". This matches a single-obstacle ``Hypersphere``/``Hyperrectangle``
+  ``.signed_distance`` natively but is **inverted** for a CSG composite like
+  ``DifferenceDomain.signed_distance`` (which uses the standard navigable-region
+  convention). Pass ``obstacle.signed_distance`` directly, not
+  ``domain.signed_distance``. Docstring example added in both
+  ``HJBGFDMSolver.__init__`` and ``NeighborhoodBuilder.__init__``.
+
 ## [0.19.6] - 2026-05-06
 
 ### Fixed

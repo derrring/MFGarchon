@@ -179,6 +179,25 @@ class NeighborhoodBuilder:
                 neighbors whose line of sight to the center point passes through the
                 obstacle (SDF < 0) are excluded. This prevents cross-wall stencils in
                 narrow channels between obstacles.
+
+                **Sign convention (Issue #1038)**: ``obstacle_sdf(x) < 0`` must mean
+                "x is INSIDE the obstacle (to be filtered out of stencil
+                line-of-sight)". This matches a single-obstacle ``Hypersphere`` /
+                ``Hyperrectangle`` ``.signed_distance``, but does **NOT** match a
+                ``DifferenceDomain(box, obstacle).signed_distance`` — the latter
+                follows the standard navigable-region convention (sd<0 inside
+                navigable, sd>0 outside), opposite of what is needed here.
+
+                For a single-obstacle problem, pass the obstacle's own
+                ``.signed_distance`` directly::
+
+                    obstacle = Hypersphere(center=..., radius=...)
+                    domain = DifferenceDomain(box, obstacle)
+                    HJBGFDMSolver(...,
+                        obstacle_sdf=obstacle.signed_distance,  # ✓ correct
+                        # NOT domain.signed_distance — that has inverted convention
+                    )
+
             visibility_samples: Number of interior samples along each segment for
                 obstacle intersection testing. Default 10.
             visibility_margin: Safety margin for obstacle proximity. Neighbors with
