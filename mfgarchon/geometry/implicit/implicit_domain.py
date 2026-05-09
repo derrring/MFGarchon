@@ -207,6 +207,11 @@ class ImplicitDomain(
             >>> bounds  # array([[-1, 1], [-1, 1]])
         """
 
+    # Note: subclasses that don't already maintain a `self.bounds` instance
+    # attribute (Hyperrectangle does) should expose `.bounds` themselves —
+    # see CSG composites (UnionDomain/IntersectionDomain/DifferenceDomain/
+    # ComplementDomain) for the Issue #1041 fix that adds them.
+
     # Note: contains() and sample_uniform() now inherited from ImplicitGeometry
 
     def project_to_domain(

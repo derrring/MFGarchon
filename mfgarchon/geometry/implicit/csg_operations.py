@@ -65,6 +65,13 @@ class UnionDomain(ImplicitDomain):
         if not all(d.dimension == self._dimension for d in domains):
             raise ValueError(f"All domains must have same dimension, got dimensions: {[d.dimension for d in domains]}")
 
+        # Issue #1041: expose `.bounds` so callers like
+        # FPParticleSolver._get_grid_params don't silently fall back to the unit
+        # hypercube. Mirrors the Hyperrectangle.bounds attribute (instance attr
+        # form, not @property — Hyperrectangle subclasses store as instance attr,
+        # which would conflict with a base-class @property without a setter).
+        self.bounds: NDArray[np.float64] = self.get_bounding_box()
+
     @property
     def dimension(self) -> int:
         """Spatial dimension."""
@@ -152,6 +159,9 @@ class IntersectionDomain(ImplicitDomain):
         # Verify all domains have same dimension
         if not all(d.dimension == self._dimension for d in domains):
             raise ValueError(f"All domains must have same dimension, got dimensions: {[d.dimension for d in domains]}")
+
+        # Issue #1041: expose `.bounds` (see UnionDomain for rationale).
+        self.bounds: NDArray[np.float64] = self.get_bounding_box()
 
     @property
     def dimension(self) -> int:
@@ -280,6 +290,15 @@ class ComplementDomain(ImplicitDomain):
                 "ComplementDomain is unbounded. Set bounding box manually via:\ncomplement.set_bounding_box(bounds)"
             )
         return self._bounding_box.copy()
+
+    @property
+    def bounds(self) -> NDArray[np.float64]:
+        """Issue #1041: expose `.bounds` for FPParticleSolver compatibility.
+
+        Same constraint as ``get_bounding_box``: requires ``set_bounding_box`` to
+        have been called (ComplementDomain is unbounded by default).
+        """
+        return self.get_bounding_box()
 
     def set_bounding_box(self, bounds: NDArray[np.float64]) -> None:
         """
