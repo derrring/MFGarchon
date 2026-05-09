@@ -405,6 +405,18 @@ class HJBGFDMSolver(BaseHJBSolver):
                 If provided and implements SupportsPeriodic (e.g., Hyperrectangle with
                 periodic_dims), enables periodic neighbor search for GFDM on torus domains.
                 Example: Hyperrectangle(bounds, periodic_dims=(0, 1)) for 2D torus.
+            obstacle_sdf: Optional callable ``f(x) -> float`` for visibility-based
+                stencil filtering. Convention: ``obstacle_sdf(x) < 0`` means x is INSIDE
+                the obstacle. Pass the obstacle's own ``.signed_distance`` directly
+                (e.g., ``obstacle_sdf=Hypersphere(...).signed_distance``); do NOT pass
+                a ``DifferenceDomain.signed_distance``, which has the opposite convention
+                (sd<0 inside the navigable region). See Issue #1038 and the full
+                docstring on ``NeighborhoodBuilder.obstacle_sdf``.
+            visibility_samples: Number of interior samples along each stencil edge for
+                obstacle intersection testing (default 10). Used only when
+                ``obstacle_sdf`` is provided.
+            visibility_margin: Safety margin for obstacle proximity (default 0.0).
+                Stencil edges passing within this distance of an obstacle are filtered.
         """
         super().__init__(problem)
 
