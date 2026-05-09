@@ -194,10 +194,10 @@ def solve_joint_socp_at_stencil(
             # and would silently break SOCP feasibility on marginal stencils.
             # Solve once for [e_lap, e_grad[0], ..., e_grad[d-1]] as columns.
             rhs = np.column_stack([e_lap, *e_grad])  # shape (k, 1+dimension)
-            sol = np.linalg.solve(ATA, rhs)          # shape (k, 1+dimension)
+            sol = np.linalg.solve(ATA, rhs)  # shape (k, 1+dimension)
             WA = W_diag @ A
             L_lsq = WA @ sol[:, 0]
-            D_lsq = (WA @ sol[:, 1:]).T              # shape (dimension, n)
+            D_lsq = (WA @ sol[:, 1:]).T  # shape (dimension, n)
 
             # Check feasibility
             L_off = np.delete(L_lsq, center_idx)
