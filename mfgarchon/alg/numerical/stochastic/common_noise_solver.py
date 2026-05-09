@@ -146,11 +146,30 @@ class CommonNoiseMFGResult:
 
 class CommonNoiseMFGSolver:
     """
-    Solver for Mean Field Games with common noise.
+    Solver for Mean Field Games with common noise via path-conditional Monte Carlo.
+
+    .. note::
+        **This is NOT a Master Equation solver** (Issue #1080). This solver
+        computes the path-conditional mean of value functions:
+
+        .. math::
+            \\bar{u}(t, x) = \\frac{1}{K} \\sum_{k=1}^{K} u^{\\theta_k}(t, x)
+
+        where each :math:`u^{\\theta_k}` solves a different conditional MFG
+        for noise path :math:`\\theta_k`. By Jensen's inequality, this is
+        **only equal** to the Master Equation value function
+        :math:`U(t, x, m_t)` when :math:`U` is affine in :math:`m`. For
+        non-linear measure dependence (e.g., congestion :math:`f(m) \\cdot m`),
+        the true Master Equation requires a measure-dependent solver, which
+        is not yet implemented.
+
+        Reference: Cardaliaguet, Delarue, Lasry, Lions (2019), "The Master
+        Equation and the Convergence Problem in Mean Field Games", AMS.
 
     Solves stochastic MFG problems via Monte Carlo over noise realizations.
     Each noise path induces a conditional MFG problem solved using standard
-    deterministic methods.
+    deterministic methods. The aggregate mean is the right quantity for
+    risk-neutral applications but not the Master Equation value.
 
     Example:
         >>> from mfgarchon.core.stochastic import (
