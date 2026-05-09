@@ -245,6 +245,29 @@ class TensorProductGrid(
         if len(self._Nx_points) != dimension:
             raise ValueError(f"Nx/Nx_points must have length {dimension} (matching bounds), got {len(self._Nx_points)}")
 
+        # Issue #1077: validate Nx_points[i] >= 1 — N=0 makes np.linspace(...,0) empty
+        # array; downstream silently breaks. N=1 is supported (single-point grid with
+        # zero spacing — see test_single_point_grid).
+        for i, n in enumerate(self._Nx_points):
+            if n < 1:
+                raise ValueError(
+                    f"Nx_points[{i}] = {n} requires N >= 1 grid points per axis. "
+                    f"Got Nx_points = {self._Nx_points}."
+                )
+
+        # Issue #1077: validate bounds (lo < hi, finite). Inverted or infinite bounds
+        # produce descending linspace / NaN propagation downstream.
+        for i, (lo, hi) in enumerate(bounds):
+            if not (lo < hi):
+                raise ValueError(
+                    f"bounds[{i}] = ({lo}, {hi}) requires lo < hi. "
+                    f"Inverted/degenerate bounds produce negative grid spacing."
+                )
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                raise ValueError(
+                    f"bounds[{i}] = ({lo}, {hi}) must be finite."
+                )
+
         self._dimension = dimension
         self.bounds = list(bounds)
         self.spacing_type = spacing_type

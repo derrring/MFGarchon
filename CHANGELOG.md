@@ -84,7 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `inv(cov)` (silently wrong for cond > 1e10); now uses `solve(cov, ...)`
   + `einsum`. Third site `neighborhood_builder.py:744` deferred
   (long-lived cache needs `lu_factor`/`lu_solve`).- **`enforce_obstacle_boundary` no longer captures particles past the outer  bounding box** (Issue #1064). When `FPParticleSolver` is configured with
-  both `implicit_domain` (for obstacle reflection) and a `BoundaryConditions`
+- **`TensorProductGrid` validates `Nx_points >= 1` + finite/ordered bounds**
+  (Issue #1077, partial). `Nx_points=[10, 0, 5]` and `bounds=[[1, 0]]` (lo > hi)
+  now raise `ValueError`. N=1 (single-point grid, zero spacing) preserved.
+  Other input-validation cases in #1077 deferred.- **`enforce_obstacle_boundary` no longer captures particles past the outer  bounding box** (Issue #1064). When `FPParticleSolver` is configured with  both `implicit_domain` (for obstacle reflection) and a `BoundaryConditions`
   containing a Dirichlet (absorbing) segment on the outer boundary,
   `enforce_obstacle_boundary` was projecting **all** particles outside the
   navigable region back inside — including those that had crossed the
