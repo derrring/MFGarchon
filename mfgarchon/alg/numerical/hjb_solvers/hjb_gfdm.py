@@ -1837,7 +1837,12 @@ class HJBGFDMSolver(BaseHJBSolver):
             H_total = H_total + running_cost
 
         # Diffusion term: (sigma^2 / 2) * Laplacian
-        sigma = getattr(self.problem, "diffusion", 0.0) or getattr(self.problem, "sigma", 0.0)
+        # Issue #1073: use _get_sigma_value (returns σ) instead of confusing
+        # `getattr(problem, "diffusion") or getattr(problem, "sigma")` chain.
+        # `problem.diffusion` returns σ²/2 (PDE coefficient D), so the old chain
+        # treated σ as D, then computed (σ²/2)² = σ⁴/8 instead of σ²/2 — 4-44× too
+        # small for σ ∈ {0.3, 0.5, 1.0, 1.414} (only σ=2 happens to be correct).
+        sigma = self._get_sigma_value(None)
         diffusion_term = 0.5 * sigma**2 * lap_u
 
         # HJB residual: -u_t + H - diffusion = 0
@@ -1886,7 +1891,12 @@ class HJBGFDMSolver(BaseHJBSolver):
             H_total = H_total + running_cost
 
         # Diffusion term: (sigma^2 / 2) * Laplacian
-        sigma = getattr(self.problem, "diffusion", 0.0) or getattr(self.problem, "sigma", 0.0)
+        # Issue #1073: use _get_sigma_value (returns σ) instead of confusing
+        # `getattr(problem, "diffusion") or getattr(problem, "sigma")` chain.
+        # `problem.diffusion` returns σ²/2 (PDE coefficient D), so the old chain
+        # treated σ as D, then computed (σ²/2)² = σ⁴/8 instead of σ²/2 — 4-44× too
+        # small for σ ∈ {0.3, 0.5, 1.0, 1.414} (only σ=2 happens to be correct).
+        sigma = self._get_sigma_value(None)
         diffusion_term = 0.5 * sigma**2 * lap_u
 
         # HJB residual: -u_t + H - diffusion = 0
@@ -1923,7 +1933,12 @@ class HJBGFDMSolver(BaseHJBSolver):
         n = self.n_points
         d = self.dimension
         dt = self.problem.T / self.problem.Nt
-        sigma = getattr(self.problem, "diffusion", 0.0) or getattr(self.problem, "sigma", 0.0)
+        # Issue #1073: use _get_sigma_value (returns σ) instead of confusing
+        # `getattr(problem, "diffusion") or getattr(problem, "sigma")` chain.
+        # `problem.diffusion` returns σ²/2 (PDE coefficient D), so the old chain
+        # treated σ as D, then computed (σ²/2)² = σ⁴/8 instead of σ²/2 — 4-44× too
+        # small for σ ∈ {0.3, 0.5, 1.0, 1.414} (only σ=2 happens to be correct).
+        sigma = self._get_sigma_value(None)
 
         # Batch dH/dp: shape (N, d)
         x = self.collocation_points
@@ -2053,7 +2068,12 @@ class HJBGFDMSolver(BaseHJBSolver):
         d = self.dimension
         dt = self.problem.T / self.problem.Nt
         lambda_val = self._get_lambda_value()
-        sigma = getattr(self.problem, "diffusion", 0.0) or getattr(self.problem, "sigma", 0.0)
+        # Issue #1073: use _get_sigma_value (returns σ) instead of confusing
+        # `getattr(problem, "diffusion") or getattr(problem, "sigma")` chain.
+        # `problem.diffusion` returns σ²/2 (PDE coefficient D), so the old chain
+        # treated σ as D, then computed (σ²/2)² = σ⁴/8 instead of σ²/2 — 4-44× too
+        # small for σ ∈ {0.3, 0.5, 1.0, 1.414} (only σ=2 happens to be correct).
+        sigma = self._get_sigma_value(None)
         diffusion_coeff = 0.5 * sigma**2
 
         # Time derivative term: (1/dt) * I

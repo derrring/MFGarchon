@@ -26,6 +26,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`HJBGFDMSolver` diffusion-term arithmetic in `scheme="none"` path**
+  (Issue #1073). Four sites in `hjb_gfdm.py` (residual_vectorized at L1840,
+  residual_hamiltonian at L1889, jacobian_hamiltonian at L1926,
+  jacobian_vectorized at L2056) sourced σ via the chain
+  `getattr(self.problem, "diffusion", 0.0) or getattr(self.problem, "sigma", 0.0)`.
+  Because `problem.diffusion` returns `σ²/2` (the PDE coefficient `D`) and
+  is truthy whenever σ > 0, this resolved σ to `D`, then computed
+  `0.5 · D² · Δu = (σ⁴/8) · Δu` instead of `D · Δu = (σ²/2) · Δu`.
+
+  Ratio of buggy/correct = `σ²/4`:
+
+  | σ | ratio | severity |
+  |---|---|---|
+  | 0.3 | 0.022 | 44× too small (paper Stage 3 high-Pe regime) |
+  | 0.5 | 0.063 | 16× too small |
+  | 1.0 | 0.250 | 4× too small |
+  | 1.414 | 0.500 | 2× too small |
+  | 2.0 | 1.000 | accidentally correct |
+
+  Fix: replace all 4 sites with `self._get_sigma_value(None)` (same pattern
+  already used correctly by `_compute_hjb_residual_with_cache` at L2024).
+
+  **Active path**: only when `monotonicity_scheme="none"` (the default).
+  QP/SOCP modes (`joint_socp`, `qp_m_matrix`) take a different code path
+  via `_compute_hjb_residual_with_cache` and were always correct. So:
+  - Tutorial / default-scheme users at σ ≠ 2 were getting wrong diffusion
+  - Production paper experiments using `joint_socp` were unaffected
+  - σ=2 is the only value where the bug coincidentally cancels
+
+  Same trap pattern as Issue #811 (`MFGProblem(diffusion=...)` vs
+  `sigma=`); cross-references same docstring at `core/mfg_problem.py:1306-1317`.
+
 - **`enforce_obstacle_boundary` no longer captures particles past the outer
   bounding box** (Issue #1064). When `FPParticleSolver` is configured with
   both `implicit_domain` (for obstacle reflection) and a `BoundaryConditions`
