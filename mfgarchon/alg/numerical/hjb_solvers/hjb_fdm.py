@@ -321,14 +321,21 @@ class HJBFDMSolver(BaseHJBSolver):
         return self._laplacian_op
 
     def _log_cfl_diagnostic(self, volatility_field: float | None = None) -> None:
-        """Log CFL diagnostic for accuracy/convergence guidance (Issue #882)."""
+        """Log CFL diagnostic for accuracy/convergence guidance (Issue #882, #1052).
+
+        Issue #1052: log once at INFO per solver instance, subsequent calls at
+        DEBUG. The CFL parameters don't change between Picard iterations, so
+        emitting INFO every iter spammed user output and caused researchers to
+        blanket-suppress warnings — masking unrelated DeprecationWarnings.
+        """
         try:
             dt = self.problem.dt
             dx = self.problem.geometry.get_grid_spacing()[0]
             sigma = volatility_field if isinstance(volatility_field, (int, float)) else self.problem.sigma
             cfl_diffusive = sigma**2 * dt / dx**2
             if cfl_diffusive > 0.5:
-                logger.info(
+                log_fn = logger.debug if getattr(self, "_cfl_logged", False) else logger.info
+                log_fn(
                     "CFL diagnostic (HJB FDM): diffusive=%.2f (sigma=%.3g, dt=%.3g, dx=%.3g). "
                     "Implicit scheme is stable but accuracy may degrade for CFL >> 1.",
                     cfl_diffusive,
@@ -336,6 +343,7 @@ class HJBFDMSolver(BaseHJBSolver):
                     dt,
                     dx,
                 )
+                self._cfl_logged = True
         except (AttributeError, IndexError, TypeError):
             pass  # Not enough info to compute CFL — skip silently
 

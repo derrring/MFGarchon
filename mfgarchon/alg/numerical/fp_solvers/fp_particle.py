@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -46,7 +46,7 @@ from .particle_result import FPParticleResult
 logger = get_logger(__name__)
 
 
-class KDENormalization(str, Enum):
+class KDENormalization(StrEnum):
     """KDE normalization strategy for particle-based FP solvers."""
 
     NONE = "none"  # No normalization (raw KDE output)
@@ -54,7 +54,7 @@ class KDENormalization(str, Enum):
     ALL = "all"  # Normalize at every time step (default)
 
 
-class KDEMethod(str, Enum):
+class KDEMethod(StrEnum):
     """Density estimation method from particles (Issue #709).
 
     Different methods handle boundary bias differently:
@@ -318,9 +318,23 @@ class FPParticleSolver(BaseFPSolver):
                         if len(geom.coordinates) > 0:
                             bounds = [(coords[0], coords[-1]) for coords in geom.coordinates]
                         else:
-                            bounds = [(0.0, 1.0)] * dimension
-                    except AttributeError:
-                        bounds = [(0.0, 1.0)] * dimension
+                            # Issue #1053: fail-fast instead of silent unit-cube
+                            # fallback. Empty coordinates on a non-Hyperrectangle
+                            # geometry means we genuinely cannot derive bounds.
+                            raise TypeError(
+                                f"FPParticleSolver._get_grid_params: cannot derive simulation bounds "
+                                f"from {type(geom).__name__} (geom.bounds, geom.xmin/.xmax, and "
+                                f"geom.coordinates all absent or empty). Implement one of these on "
+                                f"your geometry class, or wrap with a Hyperrectangle bbox."
+                            )
+                    except AttributeError as _e:
+                        # Issue #1053: same fail-fast for the AttributeError branch.
+                        raise TypeError(
+                            f"FPParticleSolver._get_grid_params: cannot derive simulation bounds "
+                            f"from {type(geom).__name__} (tried geom.bounds, geom.xmin/.xmax, "
+                            f"geom.coordinates — all raised AttributeError). Implement one of "
+                            f"these on your geometry class, or wrap with a Hyperrectangle bbox."
+                        ) from _e
 
             # Get spacing per dimension
             # For implicit geometry (e.g., Hyperrectangle), get_grid_spacing() returns None
