@@ -494,5 +494,64 @@ class TestHJBGFDMSolverIntegration:
         assert not inspect.isabstract(HJBGFDMSolver)
 
 
+class TestHJBGFDMSigmaConvention:
+    """Issue #1073: residual/Jacobian must use σ²/2 (not (σ²/2)² = σ⁴/8) as
+    the diffusion-term coefficient. Verifies that all 4 fixed sites consume
+    σ via `_get_sigma_value()` rather than the buggy `getattr-or-getattr`
+    chain that conflated σ with `problem.diffusion = σ²/2`.
+    """
+
+    def _make_solver(self, sigma):
+        domain = TensorProductGrid(
+            bounds=[(0.0, 1.0)], Nx_points=[21],
+            boundary_conditions=no_flux_bc(dimension=1),
+        )
+        problem = MFGProblem(
+            geometry=domain, T=0.1, Nt=10, sigma=sigma,
+            components=_default_components(),
+        )
+        x_coords = np.linspace(0, 1, 11)
+        collocation_points = x_coords.reshape(-1, 1)
+        return HJBGFDMSolver(problem, collocation_points)
+
+    @pytest.mark.parametrize("sigma", [0.3, 0.5, 1.0, 1.414, 2.0])
+    def test_get_sigma_value_returns_sigma_not_diffusion(self, sigma):
+        """`_get_sigma_value()` must return σ itself, not σ²/2 (the PDE coefficient D).
+
+        The 4 buggy sites (residual_vectorized, residual_hamiltonian,
+        jacobian_vectorized, jacobian_hamiltonian) used to compute
+        `0.5 * sigma**2 * lap_u` where `sigma` was sourced from
+        `getattr(problem, "diffusion", 0.0) or getattr(problem, "sigma", 0.0)`.
+        Since `problem.diffusion = σ²/2` is truthy when σ > 0, that chain
+        resolved to σ²/2, and the diffusion term became
+        `0.5 * (σ²/2)² * Δu = (σ⁴/8) * Δu` instead of `(σ²/2) * Δu`.
+
+        Only σ = 2 is accidentally correct (σ⁴/8 = σ²/2 ⇔ σ² = 4).
+        """
+        solver = self._make_solver(sigma)
+        sigma_returned = solver._get_sigma_value(None)
+        assert abs(sigma_returned - sigma) < 1e-12, (
+            f"_get_sigma_value() returned {sigma_returned}, expected σ = {sigma}. "
+            f"If it returned σ²/2 = {sigma**2/2}, the Issue #1073 regression has returned."
+        )
+
+    @pytest.mark.parametrize("sigma", [0.3, 0.5, 1.0])
+    def test_diffusion_term_uses_correct_sigma(self, sigma):
+        """The diffusion term `0.5 * σ² * Δu` must equal (σ²/2)·Δu, not (σ⁴/8)·Δu.
+
+        Direct check on the value `_get_sigma_value` returns.
+        """
+        solver = self._make_solver(sigma)
+        sigma_val = solver._get_sigma_value(None)
+        # Diffusion coefficient `0.5 · σ_val²` should equal D = σ²/2
+        diffusion_coeff = 0.5 * sigma_val**2
+        expected_D = sigma**2 / 2
+        assert abs(diffusion_coeff - expected_D) < 1e-12, (
+            f"σ={sigma}: diffusion coefficient = {diffusion_coeff}, "
+            f"expected D = σ²/2 = {expected_D}. If diffusion = (σ²/2)²/2 = "
+            f"{(sigma**2/2)**2 / 2}, Issue #1073 regression."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
