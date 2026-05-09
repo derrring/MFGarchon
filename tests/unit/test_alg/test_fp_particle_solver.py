@@ -776,5 +776,69 @@ class TestFPParticleSolverCallableDrift:
         assert np.all(M >= -1e-10)
 
 
+class TestEnforceObstacleBoundary:
+    """Issue #1064: enforce_obstacle_boundary must respect outer-boundary
+    handling — only project obstacle-interior violations, leave outer-boundary
+    violations for the caller's segment-aware BC."""
+
+    def _make_diff_domain(self):
+        """Box [0,1]² minus circular obstacle, off-center to avoid degenerate projection."""
+        from mfgarchon.geometry.implicit import (
+            DifferenceDomain, Hyperrectangle, Hypersphere,
+        )
+        box = Hyperrectangle(np.array([[0.0, 1.0], [0.0, 1.0]]))
+        # Obstacle off bbox center so project_to_domain has a non-degenerate direction
+        obstacle = Hypersphere(center=np.array([0.3, 0.5]), radius=0.15)
+        return DifferenceDomain(box, obstacle)
+
+    def test_obstacle_interior_projected(self):
+        """Particle inside obstacle is projected back to navigable region."""
+        from mfgarchon.alg.numerical.fp_solvers.fp_particle_bc import enforce_obstacle_boundary
+        domain = self._make_diff_domain()
+        particles = np.array([[0.3, 0.5]])  # obstacle center
+        result = enforce_obstacle_boundary(particles.copy(), domain)
+        assert not np.allclose(result, particles), \
+            "Particle inside obstacle should have been projected out"
+        assert domain.contains(result).all()
+
+    def test_outer_bbox_violation_left_alone(self):
+        """Issue #1064: Particle past outer bbox is NOT touched — caller's BC handles it."""
+        from mfgarchon.alg.numerical.fp_solvers.fp_particle_bc import enforce_obstacle_boundary
+        domain = self._make_diff_domain()
+        particles = np.array([[1.5, 0.5]])  # past right wall x=1.5 > bbox max 1.0
+        result = enforce_obstacle_boundary(particles.copy(), domain)
+        np.testing.assert_array_equal(result, particles)
+
+    def test_navigable_particles_untouched(self):
+        """Particles in navigable region are unchanged."""
+        from mfgarchon.alg.numerical.fp_solvers.fp_particle_bc import enforce_obstacle_boundary
+        domain = self._make_diff_domain()
+        particles = np.array([[0.1, 0.1], [0.9, 0.5], [0.3, 0.7]])
+        result = enforce_obstacle_boundary(particles.copy(), domain)
+        np.testing.assert_array_equal(result, particles)
+
+    def test_mixed_obstacle_and_outer_violations(self):
+        """Mix: one in obstacle (project), one past bbox (leave), one valid (untouched)."""
+        from mfgarchon.alg.numerical.fp_solvers.fp_particle_bc import enforce_obstacle_boundary
+        domain = self._make_diff_domain()
+        particles = np.array([
+            [0.3, 0.5],   # inside obstacle → should be projected
+            [1.5, 0.5],   # past right wall → should be left alone (Issue #1064)
+            [0.1, 0.1],   # navigable → untouched
+        ])
+        result = enforce_obstacle_boundary(particles.copy(), domain)
+        assert not np.allclose(result[0], particles[0])
+        assert domain.contains(result[0:1]).all()
+        np.testing.assert_array_equal(result[1], particles[1])
+        np.testing.assert_array_equal(result[2], particles[2])
+
+    def test_none_implicit_domain_passthrough(self):
+        """No implicit_domain → no-op."""
+        from mfgarchon.alg.numerical.fp_solvers.fp_particle_bc import enforce_obstacle_boundary
+        particles = np.array([[10.0, 10.0]])
+        result = enforce_obstacle_boundary(particles.copy(), None)
+        np.testing.assert_array_equal(result, particles)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

@@ -299,8 +299,19 @@ def enforce_obstacle_boundary(
     Enforce obstacle boundaries via implicit domain geometry (dimension-agnostic).
 
     If an implicit domain with obstacles is defined, particles that have
-    entered obstacle regions (domain.contains() returns False) are projected
-    back to the valid domain using domain.project_to_domain().
+    entered obstacle regions (domain.contains() returns False AND inside outer
+    bbox) are projected back to the valid domain using domain.project_to_domain().
+
+    Issue #1064: particles past the outer bounding box are NOT projected here —
+    they are an outer-boundary concern handled by the caller's
+    BoundaryConditions (segment-aware reflect/absorb/wrap). Re-projecting
+    outer-boundary violations preempts segment-aware Dirichlet absorption.
+
+    The discriminator:
+    - inside bbox + ~contains  →  obstacle interior  →  project here
+    - outside bbox + ~contains →  outer-boundary    →  leave for outer BC
+    - outside bbox + contains  →  impossible (contains implies inside bbox)
+    - inside bbox + contains   →  navigable region  →  no-op
 
     Parameters
     ----------
@@ -332,17 +343,27 @@ def enforce_obstacle_boundary(
     if is_1d_flat:
         particles = particles[:, np.newaxis]
 
-    # Check which particles are outside the valid domain (inside obstacles)
+    # Check which particles are outside the valid domain (inside obstacles
+    # OR past the outer boundary).
     inside_valid = implicit_domain.contains(particles)
 
     # Handle scalar return (single particle case)
     if np.isscalar(inside_valid):
         inside_valid = np.array([inside_valid])
 
-    # Project invalid particles back to domain
+    # Issue #1064: discriminate obstacle-interior violations (we project) from
+    # outer-boundary violations (caller's segment-aware BC handles these).
     if not np.all(inside_valid):
-        outside_indices = np.where(~inside_valid)[0]
-        particles[outside_indices] = implicit_domain.project_to_domain(particles[outside_indices])
+        bounds = implicit_domain.get_bounding_box()  # shape (d, 2)
+        in_bbox = np.all(
+            (particles >= bounds[:, 0]) & (particles <= bounds[:, 1]),
+            axis=1,
+        )
+        # Project only particles inside the outer bbox but in an obstacle.
+        in_obstacle = in_bbox & (~inside_valid)
+        if np.any(in_obstacle):
+            obs_idx = np.where(in_obstacle)[0]
+            particles[obs_idx] = implicit_domain.project_to_domain(particles[obs_idx])
 
     # Convert back to 1D if input was 1D
     if is_1d_flat:

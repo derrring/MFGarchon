@@ -26,6 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`enforce_obstacle_boundary` no longer captures particles past the outer
+  bounding box** (Issue #1064). When `FPParticleSolver` is configured with
+  both `implicit_domain` (for obstacle reflection) and a `BoundaryConditions`
+  containing a Dirichlet (absorbing) segment on the outer boundary,
+  `enforce_obstacle_boundary` was projecting **all** particles outside the
+  navigable region back inside — including those that had crossed the
+  Dirichlet exit segment. The segment-aware BC then never saw them, so
+  `total_absorbed` stayed at 0 and absorbing exits were silently disabled.
+
+  The fix discriminates by bounding-box membership: only particles **inside
+  the outer bbox** but in an obstacle interior get re-projected. Particles
+  **past the outer bbox** are an outer-boundary concern and are left for
+  the caller's segment-aware BC (which handles reflect / absorb / wrap per
+  segment). Composes correctly with #1042 (callable-drift segment-aware
+  routing).
+
 - **`HJBSemiLagrangianSolver._stochastic_sl_step_nd` companion fixes**
   (Issue #1054): apply the analogous trio of correctness fixes to the nD
   stochastic SL path:
