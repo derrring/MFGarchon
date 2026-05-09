@@ -801,11 +801,23 @@ class FixedPointIterator(BaseCouplingIterator):
                     measure_field.add_snapshot(mu_k, self.U.copy())
 
                 # Issue #688: Early termination on NaN/Inf (runtime safety)
+                # Issue #1078: identify HJB vs FP source for triage
                 if not np.all(np.isfinite(self.U)) or not np.all(np.isfinite(self.M)):
+                    hjb_bad = not np.all(np.isfinite(U_new))
+                    fp_bad = not np.all(np.isfinite(M_new))
+                    if hjb_bad and not fp_bad:
+                        source = "HJB (Newton divergence)"
+                    elif fp_bad and not hjb_bad:
+                        source = "FP (density blow-up)"
+                    elif hjb_bad and fp_bad:
+                        source = "both HJB and FP"
+                    else:
+                        source = "post-damping (likely Anderson acceleration)"
                     convergence_reason = "diverged_nan"
                     logger.warning(
-                        "NaN/Inf detected in iteration %d. Terminating early.",
+                        "NaN/Inf detected in iteration %d (source: %s). Terminating early.",
                         iiter + 1,
+                        source,
                     )
                     self.iterations_run = iiter + 1
                     break

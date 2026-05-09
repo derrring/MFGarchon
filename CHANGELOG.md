@@ -57,7 +57,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Same trap pattern as Issue #811 (`MFGProblem(diffusion=...)` vs
   `sigma=`); cross-references same docstring at `core/mfg_problem.py:1306-1317`.
-
+- **Picard NaN/Inf diagnostic now identifies HJB vs FP source** (Issue #1078).
+  Previously `fixed_point_iterator.py:804` (Issue #688 fix) emitted a generic
+  "NaN/Inf detected" warning when terminating early on non-finite iterates,
+  with no indication of which side blew up. Now examines `U_new` / `M_new`
+  (still in scope from earlier in the loop iteration) and labels the source
+  as `HJB (Newton divergence)`, `FP (density blow-up)`, `both`, or
+  `post-damping (likely Anderson acceleration)`. Five-line change, no new
+  control flow.
 - **`enforce_obstacle_boundary` no longer captures particles past the outer
   bounding box** (Issue #1064). When `FPParticleSolver` is configured with
   both `implicit_domain` (for obstacle reflection) and a `BoundaryConditions`
