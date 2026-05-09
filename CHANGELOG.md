@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`exit_flux_history`, `total_absorbed`). Verified by trajectory storage type
   (now `list` for segment-aware vs `ndarray` for uniform).
 
+- **CSG composite domains (`UnionDomain`, `IntersectionDomain`, `DifferenceDomain`,
+  `ComplementDomain`) now expose `.bounds`** (Issue #1041), mirroring the
+  `Hyperrectangle.bounds` API. Previously they had only `get_bounding_box()`,
+  causing `FPParticleSolver._get_grid_params` to silently fall back to the
+  unit hypercube `[(0, 1)] * d` when reading `geom.bounds`. On non-unit
+  domains (e.g., `[0, 18] × [0, 8]`) particles got reflected/clipped against
+  the wrong domain after every FP step → KDE singular covariance downstream.
+  After the fix, FPParticleSolver reads the actual domain bounds end-to-end.
+  `ComplementDomain.bounds` is a property delegating to `get_bounding_box()`
+  (raises if not manually set, since `ComplementDomain` is unbounded by
+  default — fail-fast is correct here).
+
 ### Added
 
 - **`HJBGFDMSolver` now emits a `UserWarning` when `monotonicity_scheme` is
