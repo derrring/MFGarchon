@@ -2480,7 +2480,18 @@ class HJBGFDMSolver(BaseHJBSolver):
         time_idx: int,
         running_cost: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Solve HJB at one time step using Newton iteration."""
+        """Solve HJB at one time step using Newton iteration with backtracking line search.
+
+        Globalization: each Newton iteration tries the full step `delta_u = -J⁻¹·r`,
+        then accepts iff sufficient-decrease in residual norm holds (Armijo with
+        c₁=1e-4). Otherwise halves α (geometric backtracking) until accepted or
+        α drops below `min_alpha=1e-6`. Replaces the legacy hardcoded `max_step=10`
+        cap, which prevented Newton from converging on stiff problems with
+        |U|=O(100) (e.g., 2D MFG with strong potential — observed 0/150 timesteps
+        converging to 1e-6 tolerance at high Pe).
+
+        Reference: Nocedal-Wright "Numerical Optimization" §3.1 (Armijo condition).
+        """
         from scipy.sparse.linalg import spsolve
 
         u_current = u_n_plus_1.copy()
@@ -2523,6 +2534,49 @@ class HJBGFDMSolver(BaseHJBSolver):
 
         # Compute actual time for batch Hamiltonian calls
         current_time = time_idx * (self.problem.T / self.problem.Nt)
+
+        # Closure: compute residual norm at any candidate u_trial (used by
+        # backtracking line search). Routes through the same path-selection as
+        # the Newton step itself, so residual evaluation is consistent.
+        def _residual_norm(u_trial: np.ndarray) -> float:
+            if use_hamiltonian_batch:
+                g_u, l_u = self._compute_derivatives_vectorized(u_trial)
+                r = self._compute_hjb_residual_hamiltonian(
+                    u_trial,
+                    u_n_plus_1,
+                    m_n_plus_1,
+                    g_u,
+                    l_u,
+                    H_class,
+                    current_time,
+                    running_cost=running_cost,
+                )
+            elif use_legacy_vectorized:
+                g_u, l_u = self._compute_derivatives_vectorized(u_trial)
+                r = self._compute_hjb_residual_vectorized(
+                    u_trial,
+                    u_n_plus_1,
+                    m_n_plus_1,
+                    g_u,
+                    l_u,
+                    running_cost=running_cost,
+                )
+            else:
+                derivs = self._approximate_all_derivatives_cached(u_trial)
+                r = self._compute_hjb_residual_with_cache(
+                    u_trial,
+                    u_n_plus_1,
+                    m_n_plus_1,
+                    time_idx,
+                    derivs,
+                    running_cost=running_cost,
+                )
+            return float(np.linalg.norm(r))
+
+        # Armijo backtracking parameters (Nocedal-Wright §3.1)
+        ARMIJO_C1 = 1e-4  # sufficient-decrease constant
+        BACKTRACK_FACTOR = 0.5  # geometric step reduction
+        MIN_ALPHA = 1e-6  # give up below this α
 
         for _newton_iter in range(self.max_newton_iterations):
             if use_hamiltonian_batch:
@@ -2589,7 +2643,7 @@ class HJBGFDMSolver(BaseHJBSolver):
                 jacobian_sparse, residual, time_idx
             )
 
-            # Newton update using sparse solver
+            # Newton update using sparse solver: solve J·δ = -r for δ
             try:
                 delta_u = spsolve(jacobian_bc, -residual_bc)
             except Exception as e:
@@ -2597,16 +2651,36 @@ class HJBGFDMSolver(BaseHJBSolver):
                 logger.warning(f"Sparse solver failed in Newton iteration (using dense fallback): {e}")
                 delta_u = np.linalg.lstsq(jacobian_bc.toarray(), -residual_bc, rcond=None)[0]
 
-            # Limit step size to prevent extreme updates
-            max_step = 10.0  # Reasonable limit for value function updates
-            step_norm = np.linalg.norm(delta_u)
-            if step_norm > max_step:
-                delta_u = delta_u * (max_step / step_norm)
+            # Backtracking line search (Armijo). The Newton direction `delta_u`
+            # is a descent direction for `½‖r‖²`, but the natural step `α=1`
+            # may overshoot on stiff/nonlinear problems. We search for the
+            # largest α ∈ {1, 0.5, 0.25, ...} satisfying sufficient-decrease:
+            #   ‖r(u + α·δ)‖² ≤ (1 − 2·c₁·α)·‖r(u)‖²
+            # which simplifies (for descent direction) to
+            #   ‖r(u + α·δ)‖ ≤ (1 − c₁·α)·‖r(u)‖
+            # Replaces a hardcoded `max_step=10` cap that was too restrictive
+            # for stiff problems with |U|=O(100) and too permissive elsewhere
+            # (Issue: HJB Newton non-convergence at high Pe).
+            r0_norm = float(np.linalg.norm(residual))
+            alpha = 1.0
+            u_trial = u_current + alpha * delta_u
+            u_trial = self._apply_boundary_conditions_to_solution(u_trial, time_idx)
+            r_trial_norm = _residual_norm(u_trial)
+            # Guard against NaN/Inf from too-aggressive steps
+            if not np.isfinite(r_trial_norm):
+                r_trial_norm = float("inf")
+            while r_trial_norm > (1.0 - ARMIJO_C1 * alpha) * r0_norm and alpha > MIN_ALPHA:
+                alpha *= BACKTRACK_FACTOR
+                u_trial = u_current + alpha * delta_u
+                u_trial = self._apply_boundary_conditions_to_solution(u_trial, time_idx)
+                r_trial_norm = _residual_norm(u_trial)
+                if not np.isfinite(r_trial_norm):
+                    r_trial_norm = float("inf")
 
-            u_current += delta_u
-
-            # Apply boundary conditions to solution
-            u_current = self._apply_boundary_conditions_to_solution(u_current, time_idx)
+            # Apply accepted update. If line search bottomed out (α<MIN_ALPHA)
+            # we still apply the smallest tested step rather than zero, so
+            # Newton makes some progress even when sufficient-decrease fails.
+            u_current = u_trial
 
         return u_current
 
