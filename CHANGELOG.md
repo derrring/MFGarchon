@@ -65,7 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as `HJB (Newton divergence)`, `FP (density blow-up)`, `both`, or
   `post-damping (likely Anderson acceleration)`. Five-line change, no new
   control flow.
-- **`enforce_obstacle_boundary` no longer captures particles past the outer
+- **`FPParticleSolver` meshfree KDE now uses reflection ghosts on reflecting
+  BC axes** (Issue #1083). Previously `fp_particle.py:2026-2029` constructed
+  `ParticleDensityQuery` without `reflect_bounds`, so boundary cells were
+  underestimated by ~50% (per `particle_density_query.py:558` known limit).
+  For Towel-on-Beach Gaussian with stall near the wall, this biased the next
+  Picard iteration's drift, producing a wrong fixed point.
+
+  New helper `_infer_reflect_bounds()` examines `self.boundary_conditions`
+  and returns the bounds list when at least one segment is `NO_FLUX` /
+  `REFLECTING` / `NEUMANN`. Per-axis disambiguation is deferred until BC
+  framework exposes segment→axis mapping.- **`enforce_obstacle_boundary` no longer captures particles past the outer
   bounding box** (Issue #1064). When `FPParticleSolver` is configured with
   both `implicit_domain` (for obstacle reflection) and a `BoundaryConditions`
   containing a Dirichlet (absorbing) segment on the outer boundary,
