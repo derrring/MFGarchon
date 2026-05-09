@@ -540,6 +540,11 @@ class MFGProblem(HamiltonianMixin, ConditionsMixin):
         # Note (Issue #811): volatility_field stores SDE volatility (sigma),
         # not PDE diffusion D. All solvers expect sigma and compute D = sigma^2/2
         # internally.
+        # Note (Issue #1085): mfgarchon SDE convention is **Itô**, not Stratonovich.
+        # For constant sigma, the two coincide. For callable sigma(t, x, m) with
+        # spatial dependence, users with Stratonovich-derived drift must apply
+        # the correction `alpha_Ito = alpha_Strat - (1/2) sigma * d_x sigma`
+        # before passing the drift. mfgarchon does NOT add this correction.
         self.volatility_field = vola_value
         self.drift_field = drift
 
