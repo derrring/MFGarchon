@@ -437,6 +437,32 @@ class HJBGFDMSolver(BaseHJBSolver):
                 "or qp_optimization_level=. The latter is the deprecated alias (v0.18.0)."
             )
 
+        # Issue #1034: warn when user defaults to "none" (bare Wendland-Taylor LSQ).
+        # This default produces a method whose M-matrix structure is not enforced;
+        # boundary stencils can produce oscillatory derivatives that destabilize
+        # FP-Particle coupling on long-time-horizon problems (e.g., 1D ToB at T=8
+        # with KL=0.098 and 11 spurious modes — see Issue #1034 for full evidence).
+        # Validated in mfg-research/.../exp08_towel_2d_validation/_preflight_1d/
+        # post_mortem_1d_tob_debug.md.
+        if monotonicity_scheme is None and monotonicity_application is None and qp_optimization_level is None:
+            import warnings as _w
+
+            _w.warn(
+                "HJBGFDMSolver: no `monotonicity_scheme` specified; defaulting to "
+                "'none' (no QP correction). This produces bare Wendland-Taylor LSQ "
+                "stencils whose M-matrix structure is not enforced — boundary "
+                "stencils can produce oscillatory derivatives that destabilize "
+                "FP-Particle coupling on long-time-horizon problems. For "
+                "paper-canonical monotone behavior, pass "
+                "`monotonicity_scheme='joint_socp'` (M-matrix + per-edge cone, "
+                "discrete comparison principle) or "
+                "`monotonicity_scheme='qp_m_matrix'` (M-matrix only, cheaper). "
+                "See Issue #1034. Pass `monotonicity_scheme='none'` explicitly "
+                "to suppress this warning if the bare scheme is intentional.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         if monotonicity_scheme is not None or monotonicity_application is not None:
             # New API path
             scheme = monotonicity_scheme if monotonicity_scheme is not None else "none"
