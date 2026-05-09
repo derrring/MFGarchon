@@ -76,7 +76,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the unit hypercube), which corrupted FP particle simulation on any
   non-standard geometry without a clear error. Now raises `TypeError` with
   a diagnostic pointing at the missing API.
-- **`FPParticleSolver._solve_fp_system_callable_drift` now honors segment-aware
+- **`ImplicitDomain.project_to_domain(method='simple')` now uses Newton-on-SDF
+  as a fallback** when the original line-search-toward-bbox-center fails
+  (Issue #1047). Previously the line-search exhaustion path silently teleported
+  particles to the bounding-box center — geometrically incorrect (e.g. for a
+  navigable region with an off-center obstacle, every failure-to-project
+  collapsed particles to one point, producing KDE singular covariance
+  downstream with no clear diagnostic). Now: line search first; on failure,
+  Newton iteration `x ← x − φ(x)·∇φ(x)/|∇φ|²` (uses `sdf_gradient` from
+  `sdf_utils`); if both fail (degenerate gradient or non-converging), raises
+  `RuntimeError` with diagnostic instead of silent corruption. Fail-fast.- **`FPParticleSolver._solve_fp_system_callable_drift` now honors segment-aware
   Dirichlet absorbing boundary conditions** (Issue #1042). Previously the
   callable-drift path always routed through `_apply_boundary_conditions_nd`
   (uniform topology BC) and ignored `boundary_conditions=BoundaryConditions(segments=[...])`

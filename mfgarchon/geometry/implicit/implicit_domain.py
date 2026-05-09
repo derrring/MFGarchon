@@ -249,27 +249,72 @@ class ImplicitDomain(
         if not np.any(outside):
             return x[0] if is_single else x
 
-        # Simple projection: scale toward bounding box center
+        # Simple projection: scale toward bounding box center.
+        # Issue #1047 fix: when line search exhausts, fall back to Newton-on-SDF
+        # iteration (φ(x) → 0 along ∇φ direction) instead of the previous silent
+        # bbox-center fallback. Newton-on-SDF projects to the nearest point on
+        # the zero level set; for a navigable region with a non-trivial obstacle,
+        # this is geometrically correct unlike the bbox-center heuristic.
+        # If Newton also fails (degenerate gradient or non-converging), raise
+        # rather than silently corrupting (per fail-fast doctrine).
         if method == "simple":
+            from mfgarchon.geometry.implicit.sdf_utils import sdf_gradient
+
             bounds = self.get_bounding_box()
             center = bounds.mean(axis=1)
 
             x_projected = x.copy()
             for i in np.where(outside)[0]:
-                # Move point toward center until inside
+                # Phase 1: line search toward bbox center (existing heuristic)
                 direction = center - x[i]
                 alpha = 0.0
                 step = 0.1
 
+                line_search_succeeded = False
                 for _ in range(100):
                     candidate = x[i] + alpha * direction
                     if self.signed_distance(candidate) <= 0:
                         x_projected[i] = candidate
+                        line_search_succeeded = True
                         break
                     alpha += step
+
+                if line_search_succeeded:
+                    continue
+
+                # Phase 2 (Issue #1047): Newton-on-SDF iteration
+                # x_{k+1} = x_k - φ(x_k) · ∇φ(x_k) / |∇φ|²
+                # Pulls x toward the zero level set along the SDF gradient.
+                x_i = x[i].copy()
+                converged = False
+                for _ in range(20):
+                    sd_i = float(np.atleast_1d(self.signed_distance(x_i))[0])
+                    if sd_i <= 0:
+                        converged = True
+                        break
+                    grad_i = sdf_gradient(x_i, self.signed_distance)
+                    grad_i = np.asarray(grad_i).reshape(-1)
+                    grad_norm_sq = float(np.dot(grad_i, grad_i))
+                    if grad_norm_sq < 1e-12:
+                        # Degenerate SDF gradient — can't proceed
+                        break
+                    x_i = x_i - sd_i * grad_i / grad_norm_sq
+
+                if converged:
+                    x_projected[i] = x_i
                 else:
-                    # Fallback: use center
-                    x_projected[i] = center
+                    # Both line search and Newton failed. Surface the bug rather
+                    # than silently corrupting downstream KDE / particle stepping.
+                    raise RuntimeError(
+                        f"project_to_domain(method='simple'): point {x[i]} could not "
+                        f"be projected back into domain after 100 line-search steps "
+                        f"toward bbox center {center} AND 20 Newton-on-SDF iterations. "
+                        f"This indicates a degenerate geometry (e.g. obstacle "
+                        f"completely surrounds the bbox center, or the SDF has "
+                        f"vanishing gradient near {x[i]}). Consider using "
+                        f"method='gradient' explicitly with a manually-tuned step "
+                        f"size, or check geometry.signed_distance for correctness."
+                    )
 
             return x_projected[0] if is_single else x_projected
 
