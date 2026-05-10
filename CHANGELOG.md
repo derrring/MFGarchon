@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Empirical per-stencil M-matrix verification tests for joint_socp**
+  (Issue #1074, partial). New `tests/unit/test_alg/test_socp_m_matrix_property.py`
+  verifies the 4 stencil-level invariants the paper claim depends on, across
+  σ ∈ {0.5, 1.0, 1.5}: Laplacian consistency `sum(L)=0`, off-diagonal
+  non-negative `L[off] ≥ 0`, center non-positive `L[center] ≤ 0`, and the
+  per-edge cone bound `‖D[:,j]‖ ≤ (C/h_i) · L[j]` (the non-trivial constraint
+  that closes the discrete comparison principle proof). Full assembled-matrix
+  M-matrix verification deferred (depends on dt + advection regime).
+
 ### Changed
 
 - **CFL diagnostic logging now emits at INFO once per solver instance**, then
