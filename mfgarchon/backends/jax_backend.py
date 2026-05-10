@@ -7,6 +7,7 @@ and JIT compilation.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -68,10 +69,10 @@ class JAXBackend(BaseBackend):
         # Issue #1068: explicit None-init for JIT cache slots — replaces hasattr
         # duck-typing per CLAUDE.md "Object Shape Stability". Also helps Numba/JAX
         # static analyzers track the Optional[Callable] type.
-        self._jit_hjb_step: "Callable | None" = None
-        self._jit_fpk_step: "Callable | None" = None
-        self._jit_hamiltonian: "Callable | None" = None
-        self._jit_optimal_control: "Callable | None" = None
+        self._jit_hjb_step: Callable | None = None
+        self._jit_fpk_step: Callable | None = None
+        self._jit_hamiltonian: Callable | None = None
+        self._jit_optimal_control: Callable | None = None
         super().__init__(device=device, precision=precision, **kwargs)
 
     def _setup_backend(self):
