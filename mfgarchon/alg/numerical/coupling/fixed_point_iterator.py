@@ -154,6 +154,35 @@ class FixedPointIterator(BaseCouplingIterator):
         self.volatility_field = volatility_field
         self.drift_field = drift_field
 
+        # Issue #1082: warn on HJB-FP volatility mismatch when both are scalars.
+        # If user passes `volatility_field=X` here AND `problem.sigma=Y` with
+        # X != Y, HJB sees Y and FP sees X — Picard fixed point corresponds
+        # to neither original nor (X, Y)-augmented MFG. Same trap pattern as
+        # Issue #811 (`MFGProblem.diffusion` vs `.sigma`). For non-scalar /
+        # callable cases, can't compare cheaply — silently allow (research
+        # code with augmented diffusion intentionally desyncs these).
+        problem_sigma = getattr(problem, "sigma", None)
+        if (
+            volatility_field is not None
+            and problem_sigma is not None
+            and isinstance(volatility_field, (int, float))
+            and isinstance(problem_sigma, (int, float))
+            and abs(float(volatility_field) - float(problem_sigma)) > 1e-12
+        ):
+            import warnings as _warnings
+
+            _warnings.warn(
+                f"FixedPointIterator: volatility_field={volatility_field} differs "
+                f"from problem.sigma={problem_sigma}. HJB will use problem.sigma, "
+                f"FP will use volatility_field. The Picard fixed point may "
+                f"correspond to neither the original nor the augmented MFG. "
+                f"For LLF/regularization-augmented FP, suppress this warning "
+                f"intentionally; for unintentional desync, set both to the "
+                f"same scalar.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         # Anderson acceleration support
         self.use_anderson = use_anderson
         self.anderson_accelerator = None

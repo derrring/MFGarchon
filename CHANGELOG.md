@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HJB-FP volatility consistency check in `FixedPointIterator`** (Issue #1082).
+  Warns when `volatility_field=X` is passed AND `problem.sigma=Y` with
+  `X != Y` (scalar case). HJB sees Y, FP sees X — Picard fixed point not
+  a coherent MFG. Same trap pattern as #811. Silent for callable / matched.
+
 - **Empirical per-stencil M-matrix verification tests for joint_socp**
   (Issue #1074, partial). New `tests/unit/test_alg/test_socp_m_matrix_property.py`
   verifies the 4 stencil-level invariants the paper claim depends on, across
