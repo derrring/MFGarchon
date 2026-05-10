@@ -65,6 +65,13 @@ class JAXBackend(BaseBackend):
             )
 
         self.jit_compile = jit_compile
+        # Issue #1068: explicit None-init for JIT cache slots — replaces hasattr
+        # duck-typing per CLAUDE.md "Object Shape Stability". Also helps Numba/JAX
+        # static analyzers track the Optional[Callable] type.
+        self._jit_hjb_step: "Callable | None" = None
+        self._jit_fpk_step: "Callable | None" = None
+        self._jit_hamiltonian: "Callable | None" = None
+        self._jit_optimal_control: "Callable | None" = None
         super().__init__(device=device, precision=precision, **kwargs)
 
     def _setup_backend(self):
@@ -191,13 +198,13 @@ class JAXBackend(BaseBackend):
         return -p
 
     def compute_hamiltonian(self, x, p, m, problem_params):
-        if self.jit_compile and hasattr(self, "_jit_hamiltonian"):
+        if self.jit_compile and self._jit_hamiltonian is not None:
             return self._jit_hamiltonian(x, p, m, problem_params)
         else:
             return self._hamiltonian_impl(x, p, m, problem_params)
 
     def compute_optimal_control(self, x, p, m, problem_params):
-        if self.jit_compile and hasattr(self, "_jit_optimal_control"):
+        if self.jit_compile and self._jit_optimal_control is not None:
             return self._jit_optimal_control(x, p, m, problem_params)
         else:
             return self._optimal_control_impl(x, p, m, problem_params)
@@ -261,14 +268,14 @@ class JAXBackend(BaseBackend):
 
     def hjb_step(self, U, M, dt, dx, problem_params):
         x_grid = problem_params.get("x_grid", jnp.linspace(0, 1, len(U)))
-        if self.jit_compile and hasattr(self, "_jit_hjb_step"):
+        if self.jit_compile and self._jit_hjb_step is not None:
             return self._jit_hjb_step(U, M, dt, dx, x_grid, problem_params)
         else:
             return self._hjb_step_impl(U, M, dt, dx, x_grid, problem_params)
 
     def fpk_step(self, M, U, dt, dx, problem_params):
         x_grid = problem_params.get("x_grid", jnp.linspace(0, 1, len(M)))
-        if self.jit_compile and hasattr(self, "_jit_fpk_step"):
+        if self.jit_compile and self._jit_fpk_step is not None:
             return self._jit_fpk_step(M, U, dt, dx, x_grid, problem_params)
         else:
             return self._fpk_step_impl(M, U, dt, dx, x_grid, problem_params)

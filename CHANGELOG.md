@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (bowl). This is opposite to standard MFG literature where V is "cost to
   avoid"; mfgarchon's convention is reward, agents concentrate at V_max.
 
+### Changed
+
+- **`JAXBackend` JIT cache uses explicit None-init pattern** (Issue #1068, partial).
+  Replaced 4 `hasattr(self, "_jit_*")` duck-typing checks with explicit
+  `is None` initialization in `__init__`. Per CLAUDE.md "Object Shape
+  Stability". Other #1068 hasattr clusters (core/mfg_components, types/protocols)
+  deferred — those need Protocol/ABC design.
+
 ### Fixed
 
 - **`HJBGFDMSolver` diffusion-term arithmetic in `scheme="none"` path**
