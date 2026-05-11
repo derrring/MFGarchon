@@ -232,7 +232,7 @@ def solve_joint_socp_at_stencil(
     L = cp.Variable(n)
     D = cp.Variable((dimension, n))
 
-    constraints = [A.T @ L == e_lap]
+    constraints = [e_lap == A.T @ L]
     for d in range(dimension):
         constraints.append(A.T @ D[d, :] == e_grad[d])
     for j in range(n):
@@ -340,8 +340,14 @@ def solve_relaxed_joint_socp_at_stencil(
     error.
     """
     if not _CVXPY_AVAILABLE:
-        return {"status": "solver_error", "message": "cvxpy not installed",
-                "L": None, "D": None, "kappa_max": np.inf, "objective": None}
+        return {
+            "status": "solver_error",
+            "message": "cvxpy not installed",
+            "L": None,
+            "D": None,
+            "kappa_max": np.inf,
+            "objective": None,
+        }
 
     n, k = A.shape
     if dimension is None:
@@ -354,8 +360,7 @@ def solve_relaxed_joint_socp_at_stencil(
         e_grad = [np.array([0.0, 1.0, 0.0])]
     elif dimension == 2:
         e_lap = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 1.0])
-        e_grad = [np.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
-                  np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0])]
+        e_grad = [np.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0])]
     else:
         raise ValueError(f"Only dimension 1 or 2 supported, got {dimension}")
 
@@ -364,7 +369,7 @@ def solve_relaxed_joint_socp_at_stencil(
     eps_M = cp.Variable(n, nonneg=True)  # M-matrix slack
     eps_C = cp.Variable(n, nonneg=True)  # cone slack
 
-    constraints = [A.T @ L == e_lap]
+    constraints = [e_lap == A.T @ L]
     for d in range(dimension):
         constraints.append(A.T @ D[d, :] == e_grad[d])
     for j in range(n):
@@ -384,19 +389,23 @@ def solve_relaxed_joint_socp_at_stencil(
         D_sq_per_col = cp.sum(cp.square(D), axis=0)
         base_obj = inv_w @ cp.square(L) + inv_w @ D_sq_per_col
 
-    obj = cp.Minimize(base_obj + lambda_M * cp.sum_squares(eps_M)
-                      + lambda_C * cp.sum_squares(eps_C))
+    obj = cp.Minimize(base_obj + lambda_M * cp.sum_squares(eps_M) + lambda_C * cp.sum_squares(eps_C))
 
     prob = cp.Problem(obj, constraints)
     try:
         prob.solve(solver=solver, verbose=False)
     except cp.error.SolverError as e:
-        return {"status": "solver_error", "message": str(e),
-                "L": None, "D": None, "kappa_max": np.inf, "objective": None}
+        return {
+            "status": "solver_error",
+            "message": str(e),
+            "L": None,
+            "D": None,
+            "kappa_max": np.inf,
+            "objective": None,
+        }
 
     if prob.status not in ("optimal", "optimal_inaccurate"):
-        return {"status": prob.status, "L": None, "D": None,
-                "kappa_max": np.inf, "objective": None}
+        return {"status": prob.status, "L": None, "D": None, "kappa_max": np.inf, "objective": None}
 
     L_val = L.value
     D_val = D.value
@@ -585,8 +594,13 @@ class PrecomputedJointSocpStencils:
 
             C_try = self._C
             res = solve_joint_socp_at_stencil(
-                A, center_in_nbr, h_i, C_try,
-                eps_pos=self._eps_pos, dimension=self._dimension, wendland_w=w_neighbor,
+                A,
+                center_in_nbr,
+                h_i,
+                C_try,
+                eps_pos=self._eps_pos,
+                dimension=self._dimension,
+                wendland_w=w_neighbor,
             )
             while (
                 self._C_max is not None
@@ -595,8 +609,13 @@ class PrecomputedJointSocpStencils:
             ):
                 C_try *= self._C_growth
                 res = solve_joint_socp_at_stencil(
-                    A, center_in_nbr, h_i, C_try,
-                    eps_pos=self._eps_pos, dimension=self._dimension, wendland_w=w_neighbor,
+                    A,
+                    center_in_nbr,
+                    h_i,
+                    C_try,
+                    eps_pos=self._eps_pos,
+                    dimension=self._dimension,
+                    wendland_w=w_neighbor,
                 )
 
             # If still infeasible after C-bisection, fall through to the always-
@@ -610,9 +629,15 @@ class PrecomputedJointSocpStencils:
             if res["status"] != "feasible" and self._use_relaxed_fallback:
                 C_relaxed = self._C if self._C_max is None else self._C_max
                 res = solve_relaxed_joint_socp_at_stencil(
-                    A, center_in_nbr, h_i, C_relaxed,
-                    eps_pos=self._eps_pos, dimension=self._dimension, wendland_w=w_neighbor,
-                    lambda_M=self._lambda_M, lambda_C=self._lambda_C,
+                    A,
+                    center_in_nbr,
+                    h_i,
+                    C_relaxed,
+                    eps_pos=self._eps_pos,
+                    dimension=self._dimension,
+                    wendland_w=w_neighbor,
+                    lambda_M=self._lambda_M,
+                    lambda_C=self._lambda_C,
                 )
 
             if res["status"] != "feasible":

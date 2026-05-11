@@ -947,12 +947,14 @@ class HJBGFDMSolver(BaseHJBSolver):
             stats = self._joint_socp_stencils.stats
             relax_C_msg = (
                 f"; {stats['n_relaxed_C']} C-relaxed (max C={stats['max_achieved_C']:.2f})"
-                if stats.get("n_relaxed_C", 0) > 0 else ""
+                if stats.get("n_relaxed_C", 0) > 0
+                else ""
             )
             relax_fb_msg = (
                 f"; {stats['n_relaxed_fallback']} via relaxed SOCP "
                 f"(max ε_M={stats['max_eps_M']:.2e}, ε_C={stats['max_eps_C']:.2e})"
-                if stats.get("n_relaxed_fallback", 0) > 0 else ""
+                if stats.get("n_relaxed_fallback", 0) > 0
+                else ""
             )
             logger.info(
                 f"Precomputed joint SOCP stencils: feasible {stats['n_feasible']}/"

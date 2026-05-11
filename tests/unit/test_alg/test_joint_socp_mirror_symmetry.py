@@ -23,15 +23,15 @@ from __future__ import annotations
 
 import warnings
 
-import numpy as np
 import pytest
+
+import numpy as np
 
 pytest.importorskip("cvxpy")
 
 from mfgarchon.alg.numerical.hjb_solvers.hjb_gfdm import HJBGFDMSolver
 from mfgarchon.geometry import Hyperrectangle
 from mfgarchon.geometry.boundary import BCSegment, BCType, BoundaryConditions
-
 
 # ---------------------------------------------------------------------------
 # Minimal mock to drive HJBGFDMSolver without full MFGComponents
@@ -103,17 +103,17 @@ def _make_solver(pts, bdry, geom, scheme="joint_socp", **overrides):
         ],
         dimension=2,
     )
-    kwargs = dict(
-        delta=1.5,
-        k_neighbors=12,
-        derivative_method="taylor",
-        taylor_order=2,
-        weight_function="wendland",
-        collocation_geometry=geom,
-        adaptive_neighborhoods=False,
-        boundary_conditions=bc,
-        monotonicity_scheme=scheme,
-    )
+    kwargs = {
+        "delta": 1.5,
+        "k_neighbors": 12,
+        "derivative_method": "taylor",
+        "taylor_order": 2,
+        "weight_function": "wendland",
+        "collocation_geometry": geom,
+        "adaptive_neighborhoods": False,
+        "boundary_conditions": bc,
+        "monotonicity_scheme": scheme,
+    }
     kwargs.update(overrides)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -204,8 +204,7 @@ def test_achieved_C_is_recorded_and_satisfies_cone():
 
     # Every feasible stencil should have an entry
     assert len(socp.achieved_C) == socp.stats["n_feasible"], (
-        f"achieved_C size {len(socp.achieved_C)} != n_feasible "
-        f"{socp.stats['n_feasible']}"
+        f"achieved_C size {len(socp.achieved_C)} != n_feasible {socp.stats['n_feasible']}"
     )
 
     # Every recorded C is in [solver default C, C_max]
@@ -289,6 +288,7 @@ def test_precompute_completes_on_dense_cloud():
     geom = Hyperrectangle(np.array([[0.0, LX], [0.0, LY]]))
 
     import time as _time
+
     t0 = _time.perf_counter()
     s = _make_solver(pts, bdry, geom)
     dt = _time.perf_counter() - t0
