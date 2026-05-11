@@ -916,17 +916,53 @@ class HJBGFDMSolver(BaseHJBSolver):
                 points=self.collocation_points,
                 interior_indices=interior_indices,
                 delta=delta,
-                cone_constant_C=1.0,  # within $C_\\star \\in [0.5, 1]$ for Wendland C^2
+                cone_constant_C=8.0,  # higher C → cone less binding, picks fast-path Wendland-LSQ where M-matrix holds
                 eps_pos=0.0,
+                # Pass post-filter neighborhoods so SOCP weights are defined on
+                # the same stencil runtime uses to build `b` at the override
+                # site (`approximate_derivatives` line ~1675). Required to make
+                # the override correct on irregular clouds where the visibility
+                # filter (or ghost-node augmentation) modifies stencil indices
+                # between operator and `self.neighborhoods`.
+                neighborhoods=self.neighborhoods,
+                # C-bisection: retry infeasible stencils with progressively
+                # larger C up to C_max. Most marginally infeasible stencils
+                # become feasible at C ∈ (1, 8].
+                cone_constant_C_max=8.0,
+                # Always-feasible relaxed SOCP fallback. Eliminates the
+                # discrete scheme switch between joint_socp (overrides L+D)
+                # and Phase 2 M-matrix-QP (overrides only L; leaves D as bare
+                # W-T) that creates discontinuous discretization on irregular
+                # 2D clouds. With this enabled, ALL interior points get
+                # consistent (L, D) from the SOCP framework — well-conditioned
+                # stencils recover exact joint_socp; marginally infeasible
+                # stencils smoothly degrade via slack penalties (continuous
+                # mapping cloud→stencil weights). Empirically required for
+                # 2D obstacle navigation; latent on 1D / quasi-uniform clouds
+                # where infeasibility doesn't fire.
+                use_relaxed_fallback=True,
+                lambda_M=1.0e4,
+                lambda_C=1.0e4,
             )
             stats = self._joint_socp_stencils.stats
+            relax_C_msg = (
+                f"; {stats['n_relaxed_C']} C-relaxed (max C={stats['max_achieved_C']:.2f})"
+                if stats.get("n_relaxed_C", 0) > 0
+                else ""
+            )
+            relax_fb_msg = (
+                f"; {stats['n_relaxed_fallback']} via relaxed SOCP "
+                f"(max ε_M={stats['max_eps_M']:.2e}, ε_C={stats['max_eps_C']:.2e})"
+                if stats.get("n_relaxed_fallback", 0) > 0
+                else ""
+            )
             logger.info(
                 f"Precomputed joint SOCP stencils: feasible {stats['n_feasible']}/"
                 f"{stats['n_interior']} interior "
                 f"({stats['n_fast_path']} via Wendland-LSQ fast-path, "
-                f"{stats['n_socp']} via CLARABEL SOCP) in {stats['time_ms']:.1f}ms; "
-                f"SOCP-infeasible {stats['n_infeasible']} fall back to "
-                f"M-matrix QP (Phase 2)"
+                f"{stats['n_socp']} via CLARABEL SOCP{relax_C_msg}{relax_fb_msg}) in "
+                f"{stats['time_ms']:.1f}ms; SOCP-infeasible {stats['n_infeasible']} fall "
+                f"back to M-matrix QP (Phase 2)"
             )
 
         # Initialize precomputed M-matrix QP stencils at boundary nodes.

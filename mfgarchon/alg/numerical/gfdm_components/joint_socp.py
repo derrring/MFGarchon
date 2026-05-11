@@ -232,7 +232,7 @@ def solve_joint_socp_at_stencil(
     L = cp.Variable(n)
     D = cp.Variable((dimension, n))
 
-    constraints = [A.T @ L == e_lap]
+    constraints = [e_lap == A.T @ L]
     for d in range(dimension):
         constraints.append(A.T @ D[d, :] == e_grad[d])
     for j in range(n):
@@ -301,6 +301,139 @@ def solve_joint_socp_at_stencil(
     }
 
 
+def solve_relaxed_joint_socp_at_stencil(
+    A: np.ndarray,
+    center_idx: int,
+    h_i: float,
+    C: float,
+    eps_pos: float = 0.0,
+    solver: str = "CLARABEL",
+    dimension: int | None = None,
+    wendland_w: np.ndarray | None = None,
+    lambda_M: float = 1.0e4,
+    lambda_C: float = 1.0e4,
+) -> dict:
+    """Always-feasible relaxed joint SOCP.
+
+    Replaces hard constraints `L_j >= 0` and `||D[:,j]|| <= C * L_j / h` with
+    slack-penalty soft versions:
+
+        L_j >= -ε_M_j,   ε_M_j >= 0   (penalty: λ_M * ε_M_j²)
+        ||D[:,j]|| <= (C/h) * (L_j + ε_C_j),   ε_C_j >= 0   (penalty: λ_C * ε_C_j²)
+
+    The hard equality constraints `A^T L = e_lap`, `A^T D = e_grad` (consistency)
+    are preserved. Solution always exists.
+
+    For well-conditioned stencils where `solve_joint_socp_at_stencil` is feasible,
+    large penalties (λ_M, λ_C ≥ 1e4) drive ε → 0 and recover the original
+    joint_socp solution. For marginally infeasible stencils, the slacks activate
+    smoothly, producing a continuous map (cloud geometry → stencil weights).
+
+    This continuity is the key property: it eliminates scheme-switch
+    discontinuity between SOCP-feasible and Phase-2 fallback regimes that
+    plague hybrid joint_socp + M-matrix-QP architectures on irregular 2D
+    clouds (where mirror stencils with similar geometry can land on different
+    sides of the SOCP feasibility threshold and receive incompatible weights).
+
+    Returns: dict with same keys as solve_joint_socp_at_stencil + "eps_M_max"
+    and "eps_C_max" diagnostics. Status is always "feasible" except on solver
+    error.
+    """
+    if not _CVXPY_AVAILABLE:
+        return {
+            "status": "solver_error",
+            "message": "cvxpy not installed",
+            "L": None,
+            "D": None,
+            "kappa_max": np.inf,
+            "objective": None,
+        }
+
+    n, k = A.shape
+    if dimension is None:
+        dimension = {3: 1, 6: 2}.get(k)
+        if dimension is None:
+            raise ValueError(f"Cannot infer dimension from A.shape[1]={k}")
+
+    if dimension == 1:
+        e_lap = np.array([0.0, 0.0, 1.0])
+        e_grad = [np.array([0.0, 1.0, 0.0])]
+    elif dimension == 2:
+        e_lap = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 1.0])
+        e_grad = [np.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0])]
+    else:
+        raise ValueError(f"Only dimension 1 or 2 supported, got {dimension}")
+
+    L = cp.Variable(n)
+    D = cp.Variable((dimension, n))
+    eps_M = cp.Variable(n, nonneg=True)  # M-matrix slack
+    eps_C = cp.Variable(n, nonneg=True)  # cone slack
+
+    constraints = [e_lap == A.T @ L]
+    for d in range(dimension):
+        constraints.append(A.T @ D[d, :] == e_grad[d])
+    for j in range(n):
+        if j == center_idx:
+            continue
+        # Soft M-matrix: L_j + eps_M_j >= eps_pos  =>  L_j >= eps_pos - eps_M_j
+        constraints.append(L[j] + eps_M[j] >= eps_pos)
+        # Soft cone: ||D[:,j]||_2 <= (C/h) * (L_j + eps_C_j)
+        constraints.append(cp.norm(D[:, j], 2) <= (C / h_i) * (L[j] + eps_C[j]))
+
+    if wendland_w is None:
+        base_obj = cp.sum_squares(L) + cp.sum_squares(D)
+    else:
+        w = np.asarray(wendland_w, dtype=float)
+        MAX_INV_W = 1000.0
+        inv_w = np.minimum(1.0 / w, MAX_INV_W / float(w.max()))
+        D_sq_per_col = cp.sum(cp.square(D), axis=0)
+        base_obj = inv_w @ cp.square(L) + inv_w @ D_sq_per_col
+
+    obj = cp.Minimize(base_obj + lambda_M * cp.sum_squares(eps_M) + lambda_C * cp.sum_squares(eps_C))
+
+    prob = cp.Problem(obj, constraints)
+    try:
+        prob.solve(solver=solver, verbose=False)
+    except cp.error.SolverError as e:
+        return {
+            "status": "solver_error",
+            "message": str(e),
+            "L": None,
+            "D": None,
+            "kappa_max": np.inf,
+            "objective": None,
+        }
+
+    if prob.status not in ("optimal", "optimal_inaccurate"):
+        return {"status": prob.status, "L": None, "D": None, "kappa_max": np.inf, "objective": None}
+
+    L_val = L.value
+    D_val = D.value
+    eps_M_max = float(np.max(eps_M.value))
+    eps_C_max = float(np.max(eps_C.value))
+    kappas = []
+    for j in range(n):
+        if j == center_idx:
+            continue
+        denom = L_val[j] + eps_C.value[j]
+        if denom <= 1e-12:
+            kappas.append(np.inf)
+        else:
+            kappas.append(h_i * np.linalg.norm(D_val[:, j]) / denom)
+    kmax = float(np.max(kappas)) if kappas else np.nan
+
+    return {
+        "status": "feasible",
+        "L": L_val,
+        "D": D_val,
+        "kappa_max": kmax,
+        "objective": float(prob.value),
+        "via": "relaxed_socp_clarabel",
+        "eps_M_max": eps_M_max,
+        "eps_C_max": eps_C_max,
+    }
+
+
 # =============================================================================
 # Precomputed joint SOCP stencils (precompute application strategy)
 # =============================================================================
@@ -363,6 +496,12 @@ class PrecomputedJointSocpStencils:
         delta: float,
         cone_constant_C: float = 1.0,
         eps_pos: float = 0.0,
+        neighborhoods: dict | None = None,
+        cone_constant_C_max: float | None = None,
+        cone_constant_C_growth: float = 2.0,
+        use_relaxed_fallback: bool = False,
+        lambda_M: float = 1.0e4,
+        lambda_C: float = 1.0e4,
     ):
         if not _CVXPY_AVAILABLE:
             raise ImportError("cvxpy is required for joint SOCP. Install with: pip install cvxpy")
@@ -372,18 +511,40 @@ class PrecomputedJointSocpStencils:
         self._delta = float(delta)
         self._C = float(cone_constant_C)
         self._eps_pos = float(eps_pos)
+        # Post-filter neighborhoods (after visibility filter, ghost nodes, LCR).
+        # See class docstring for why this is required for correctness on
+        # irregular clouds where the visibility filter modifies stencils.
+        self._neighborhoods = neighborhoods
+        # Per-stencil C-bisection cap. None disables bisection.
+        # When set, infeasible stencils retry with C *= cone_constant_C_growth
+        # until feasible or C exceeds C_max.
+        self._C_max = float(cone_constant_C_max) if cone_constant_C_max is not None else None
+        self._C_growth = float(cone_constant_C_growth)
+        # Always-feasible relaxed-SOCP fallback for stencils that fail
+        # C-bisection. When True, n_infeasible should be 0 (every interior
+        # point gets joint-SOCP-style (L, D), with slack penalties handling
+        # marginally infeasible cases continuously).
+        self._use_relaxed_fallback = bool(use_relaxed_fallback)
+        self._lambda_M = float(lambda_M)
+        self._lambda_C = float(lambda_C)
         self._dimension = self._points.shape[1] if self._points.ndim == 2 else 1
 
         if self._dimension not in (1, 2):
             raise ValueError(f"Joint SOCP currently supports 1D or 2D, got dimension {self._dimension}")
 
         self.stencils: dict[int, JointSocpStencilData] = {}
+        self.achieved_C: dict[int, float] = {}
         self.stats = {
             "n_interior": len(self._interior_indices),
             "n_feasible": 0,
             "n_infeasible": 0,
             "n_fast_path": 0,
             "n_socp": 0,
+            "n_relaxed_C": 0,
+            "max_achieved_C": float(self._C),
+            "n_relaxed_fallback": 0,  # stencils that needed slack-penalty solve
+            "max_eps_M": 0.0,
+            "max_eps_C": 0.0,
             "time_ms": 0.0,
         }
         self._precompute()
@@ -394,13 +555,27 @@ class PrecomputedJointSocpStencils:
 
         for i in self._interior_indices:
             i = int(i)
-            dw = self._operator.get_derivative_weights(i)
-            if dw is None:
-                continue
-            nbr = dw["neighbor_indices"]
-            center_in_nbr = dw["center_idx_in_neighbors"]
-            if center_in_nbr < 0:
-                continue
+            if self._neighborhoods is not None:
+                # Use post-filter neighborhood (matches runtime exactly).
+                nh = self._neighborhoods.get(int(i))
+                if nh is None:
+                    continue
+                nbr = np.asarray(nh["indices"])
+                # Locate center index `i` within the neighbor list (post-filter
+                # neighborhoods include the center as one of the entries — this
+                # is the convention of `NeighborhoodBuilder`).
+                center_match = np.where(nbr == int(i))[0]
+                if len(center_match) == 0:
+                    continue
+                center_in_nbr = int(center_match[0])
+            else:
+                dw = self._operator.get_derivative_weights(i)
+                if dw is None:
+                    continue
+                nbr = dw["neighbor_indices"]
+                center_in_nbr = dw["center_idx_in_neighbors"]
+                if center_in_nbr < 0:
+                    continue
 
             offsets = self._points[nbr] - self._points[i]
             offsets_for_taylor = offsets.reshape(-1) if self._dimension == 1 and offsets.ndim == 2 else offsets
@@ -417,15 +592,53 @@ class PrecomputedJointSocpStencils:
             nz = dists[dists > 1e-12]
             h_i = float(np.median(nz)) if len(nz) > 0 else self._delta
 
+            C_try = self._C
             res = solve_joint_socp_at_stencil(
                 A,
                 center_in_nbr,
                 h_i,
-                self._C,
+                C_try,
                 eps_pos=self._eps_pos,
                 dimension=self._dimension,
                 wendland_w=w_neighbor,
             )
+            while (
+                self._C_max is not None
+                and res["status"] != "feasible"
+                and C_try * self._C_growth <= self._C_max + 1e-12
+            ):
+                C_try *= self._C_growth
+                res = solve_joint_socp_at_stencil(
+                    A,
+                    center_in_nbr,
+                    h_i,
+                    C_try,
+                    eps_pos=self._eps_pos,
+                    dimension=self._dimension,
+                    wendland_w=w_neighbor,
+                )
+
+            # If still infeasible after C-bisection, fall through to the always-
+            # feasible relaxed SOCP. This eliminates the discrete scheme switch
+            # between joint_socp and Phase-2 M-matrix-QP that creates
+            # discontinuous discretization on irregular clouds. For
+            # well-conditioned stencils (the C-bisection feasible cases), the
+            # original joint_socp solution is used. For marginally infeasible
+            # stencils, the relaxed SOCP smoothly degrades while maintaining
+            # the equality constraints (consistency).
+            if res["status"] != "feasible" and self._use_relaxed_fallback:
+                C_relaxed = self._C if self._C_max is None else self._C_max
+                res = solve_relaxed_joint_socp_at_stencil(
+                    A,
+                    center_in_nbr,
+                    h_i,
+                    C_relaxed,
+                    eps_pos=self._eps_pos,
+                    dimension=self._dimension,
+                    wendland_w=w_neighbor,
+                    lambda_M=self._lambda_M,
+                    lambda_C=self._lambda_C,
+                )
 
             if res["status"] != "feasible":
                 self.stats["n_infeasible"] += 1
@@ -439,9 +652,18 @@ class PrecomputedJointSocpStencils:
                 kappa_max=float(res["kappa_max"]),
                 via=res.get("via", "socp_clarabel"),
             )
+            self.achieved_C[i] = C_try
             self.stats["n_feasible"] += 1
+            if C_try > self._C + 1e-12:
+                self.stats["n_relaxed_C"] += 1
+                if C_try > self.stats["max_achieved_C"]:
+                    self.stats["max_achieved_C"] = C_try
             if res.get("via") == "wendland_lsq_fast_path":
                 self.stats["n_fast_path"] += 1
+            elif res.get("via") == "relaxed_socp_clarabel":
+                self.stats["n_relaxed_fallback"] += 1
+                self.stats["max_eps_M"] = max(self.stats["max_eps_M"], res.get("eps_M_max", 0.0))
+                self.stats["max_eps_C"] = max(self.stats["max_eps_C"], res.get("eps_C_max", 0.0))
             else:
                 self.stats["n_socp"] += 1
 
