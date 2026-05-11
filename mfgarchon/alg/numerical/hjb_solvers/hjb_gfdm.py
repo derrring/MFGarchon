@@ -1043,69 +1043,57 @@ class HJBGFDMSolver(BaseHJBSolver):
     def _get_bc_type_for_point(self, point_idx: int) -> str:
         """Determine BC type for a boundary collocation point.
 
-        For mixed BC (like multi-exit), determines if point is at:
-        - Exit (DIRICHLET): absorbing boundary
-        - Wall (NEUMANN/NO_FLUX): reflecting boundary
+        Resolution order:
 
-        Args:
-            point_idx: Index of boundary collocation point
+        1. **Pre-classified table** (preferred): for mixed BC, the segment
+           was resolved at solver __init__ time and stored in
+           ``self._bc_segment_per_point``. O(1) lookup, no re-classification.
+        2. **Uniform BC**: read global type from ``_bc_config``.
+
+        For mixed BC where the point was *not* pre-classified, this method
+        raises ``ValueError`` rather than silently falling back to
+        ``self.boundary_conditions.default_bc`` (which defaults to PERIODIC
+        — historically the source of silent zero Jacobian rows). The
+        pre-classification at __init__ already raised on unmatched points
+        with full diagnostic; reaching here means the boundary_indices set
+        was mutated after __init__, which is a programmer error.
 
         Returns:
-            BC type string: "dirichlet" or "neumann"
+            BC type string: "dirichlet", "neumann", or any other BCType
+            ``.value.lower()`` for completeness.
         """
-        # Get global BC type from config (handles uniform BC case)
-        bc_type = self._bc_config.get("type") if self._bc_config else None
-
-        # Check if mixed BC - use try/except instead of hasattr
         try:
             is_mixed = self.boundary_conditions.is_mixed
         except AttributeError:
-            # Not a BoundaryConditions object - use global type
-            if bc_type is None:
-                raise ValueError("BC type required but not specified in config.") from None
-            return bc_type
+            is_mixed = False
 
-        if not is_mixed:
-            if bc_type is None:
-                raise ValueError("BC type required but not specified in config.")
-            return bc_type
+        if is_mixed:
+            # Pre-classified table is authoritative for mixed BC.
+            try:
+                segment = self._bc_segment_per_point[point_idx]
+            except (AttributeError, KeyError) as exc:
+                raise ValueError(
+                    f"_get_bc_type_for_point({point_idx}): point not in pre-classified "
+                    f"table. boundary_indices was likely mutated after solver __init__, "
+                    f"or this method was called before HJBGFDMSolver.__init__ completed. "
+                    f"Pre-classified count: "
+                    f"{len(getattr(self, '_bc_segment_per_point', {}))}/"
+                    f"{len(self.boundary_indices)}."
+                ) from exc
+            if segment.bc_type == BCType.DIRICHLET:
+                return "dirichlet"
+            if segment.bc_type in (BCType.NEUMANN, BCType.NO_FLUX):
+                return "neumann"
+            return segment.bc_type.value.lower()
 
-        # Mixed BC - delegate to BCSegment.matches_point() for proper matching
-        # This supports rectangular, SDF-based, and normal-direction matching
-        point = self.collocation_points[point_idx]
-
-        # Prepare context for matching (Issue #542 fix - support general geometries)
-        domain_bounds = self._get_domain_bounds_array()
-        boundary_id = self._infer_boundary_id(point, domain_bounds)
-        domain_sdf = self._get_domain_sdf()
-
-        # Sort segments by priority (higher priority first)
-        sorted_segments = sorted(
-            self.boundary_conditions.segments,
-            key=lambda seg: seg.priority,
-            reverse=True,
-        )
-
-        # Find first matching segment
-        from mfgarchon.geometry.boundary import BCType
-
-        for segment in sorted_segments:
-            if segment.matches_point(
-                point=point,
-                boundary_id=boundary_id,
-                domain_bounds=domain_bounds,
-                domain_sdf=domain_sdf,
-            ):
-                # Map BCType to string for solver
-                if segment.bc_type == BCType.DIRICHLET:
-                    return "dirichlet"
-                elif segment.bc_type in (BCType.NEUMANN, BCType.NO_FLUX):
-                    return "neumann"
-                else:
-                    return segment.bc_type.value.lower()
-
-        # No segment match - use default BC
-        return self.boundary_conditions.default_bc.value.lower()
+        # Uniform BC: global type from config.
+        bc_type = self._bc_config.get("type") if self._bc_config else None
+        if bc_type is None:
+            raise ValueError(
+                "BC type required but not specified in config (uniform BC path). "
+                "Provide boundary_conditions= when constructing HJBGFDMSolver."
+            )
+        return bc_type
 
     def _preclassify_boundary_points(self) -> None:
         """Pre-classify every boundary collocation point to a BCSegment + face + normal.
