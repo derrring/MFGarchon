@@ -349,7 +349,16 @@ class BoundaryHandler:
         for i in self.boundary_indices:
             weights_data = self._gfdm_operator.get_derivative_weights(i)
             if weights_data is None:
-                continue
+                raise ValueError(
+                    f"build_neumann_bc_weights: operator returned None for "
+                    f"boundary point {int(i)} at "
+                    f"{self.collocation_points[int(i)].tolist()}. Cannot enforce "
+                    f"Neumann BC without derivative weights. Likely degenerate "
+                    f"stencil (collocation generator gave a point with no "
+                    f"valid neighbors) or operator construction failure. "
+                    f"Silent skip would leave this point with no BC; raising "
+                    f"per #547 / Issue #1113."
+                )
 
             neighbor_indices = weights_data["neighbor_indices"]
             grad_weights = weights_data["grad_weights"]  # shape: (d, n_neighbors)
@@ -497,9 +506,21 @@ class BoundaryHandler:
         for i in boundary_set:
             normal = self.compute_outward_normal(i)
 
-            # Skip if normal is zero
+            # Defense: zero normal means BC classifier returned no face for
+            # this point. After PR #1097 + #1111 this should never happen
+            # (closed-inequality tolerance + face-derived ±1 normal). Raise
+            # rather than silent-skip per #547 policy (Issue #1113): a
+            # silent-skipped LCR point falls back to plain (non-rotated)
+            # Taylor LSQ, which may degrade boundary-stencil conditioning
+            # in ways that aren't visible until Newton convergence fails.
             if np.linalg.norm(normal) < 1e-10:
-                continue
+                raise ValueError(
+                    f"apply_local_coordinate_rotation: zero outward normal at "
+                    f"boundary point {int(i)} ({self.collocation_points[int(i)].tolist()}). "
+                    f"Indicates BC classifier failure — point not assigned to "
+                    f"any face. Check tolerance settings and BoundaryConditions "
+                    f"segment coverage. Raising per #547 / Issue #1113."
+                )
 
             # Build rotation matrix
             R = self.build_rotation_matrix(normal)
@@ -618,7 +639,25 @@ class BoundaryHandler:
         interior_indices = neighbor_indices[interior_mask]
 
         if len(interior_points) == 0:
-            return np.zeros((0, self.dimension)), np.array([]), np.array([])
+            # No neighbor lies strictly inside the half-space defined by the
+            # outward normal — geometric edge case (e.g. degenerate one-sided
+            # stencil where every neighbor sits along the wall plane). Cannot
+            # build reflection ghosts. Raising rather than returning empty
+            # per #547 / Issue #1113: silent zero-ghost return would let the
+            # broader ghost augmentation continue with no ghost neighbors for
+            # this point, indistinguishable from a successfully ghosted point
+            # at the call site.
+            raise ValueError(
+                f"create_ghost_neighbors: no interior-side neighbor at "
+                f"boundary point {int(point_idx)} "
+                f"({self.collocation_points[int(point_idx)].tolist()}); "
+                f"normal={normal.tolist()}. Stencil has {len(neighbor_indices)} "
+                f"neighbors but all lie on the boundary plane "
+                f"(offsets @ normal >= -1e-10). Cannot build reflection "
+                f"ghosts. Likely an extremely degenerate collocation; "
+                f"consider densifying interior near this boundary. Raising "
+                f"per #547 / Issue #1113."
+            )
 
         # Create ghost points by reflection (delegated to geometry utility)
         ghost_points = create_reflection_ghost_points(center, interior_points, normal)
@@ -701,13 +740,13 @@ class BoundaryHandler:
             neighbor_points = neighborhood["points"]
             neighbor_indices = neighborhood["indices"]
 
-            # Create ghost neighbors
+            # Create ghost neighbors. After the silent-skip → raise sweep
+            # (#1113), create_ghost_neighbors raises on the empty-interior
+            # geometric edge case rather than returning empty arrays.
+            # Reaching here always yields a non-empty ghost set.
             ghost_points, ghost_indices, mirror_indices = self.create_ghost_neighbors(
                 i, neighbor_points, neighbor_indices
             )
-
-            if len(ghost_points) == 0:
-                continue
 
             # Augment neighborhood
             augmented_points = np.vstack([neighbor_points, ghost_points])

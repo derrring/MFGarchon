@@ -344,30 +344,41 @@ def test_apply_ghost_nodes_legacy_uniform_neumann_still_works():
         dimension=2,
         default_bc=BCType.NO_FLUX,
     )
+    # Build realistic neighborhoods (each boundary point has nearby interior
+    # neighbors), so create_ghost_neighbors can actually reflect them.
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(pts)
+    _, idxs = tree.query(pts, k=8)
+    neighborhoods = {
+        int(i): {
+            "indices": idxs[int(i)],
+            "points": pts[idxs[int(i)]],
+            "distances": np.linalg.norm(pts[idxs[int(i)]] - pts[int(i)], axis=1),
+            "size": len(idxs[int(i)]),
+        }
+        for i in range(len(pts))
+    }
     handler = BoundaryHandler(
         collocation_points=pts,
         dimension=2,
         domain_bounds=np.array([[0.0, LX], [0.0, LY]]),
         boundary_indices=bdry_idx,
-        neighborhoods={
-            int(i): {
-                "indices": np.array([int(i)]),
-                "points": pts[int(i) : int(i) + 1],
-                "distances": np.zeros(1),
-                "size": 1,
-            }
-            for i in bdry_idx
-        },
+        neighborhoods=neighborhoods,
         boundary_conditions=bc,
         use_ghost_nodes=True,
         use_wind_dependent_bc=False,
         gfdm_operator=None,
         bc_property_getter=lambda prop, default=None: "no_flux" if prop == "type" else default,
     )
-    # Legacy call with no bc_type_for_point — should still work via the
-    # bc_property_getter returning "no_flux"
+    # Legacy call with no bc_type_for_point — falls back to the bc_property_
+    # getter returning "no_flux" globally. Realistic neighborhood lets the
+    # reflection proceed without hitting the post-#1113 raise for empty
+    # interior-side neighbors.
     handler.apply_ghost_nodes_to_neighborhoods()
-    # With only single self-neighbor per point, no interior-side points exist
-    # to reflect; expect zero ghosts but no crash. The contract being tested
-    # is "function runs without early-exit on mixed-BC global check".
-    assert True  # reached without exception
+    n_ghosted = sum(
+        1
+        for i in bdry_idx
+        if handler.neighborhoods[int(i)].get("has_ghost", False)
+    )
+    assert n_ghosted > 0, "Legacy uniform-NEUMANN call must trigger ghost augmentation"
