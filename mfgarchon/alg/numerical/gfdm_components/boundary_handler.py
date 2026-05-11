@@ -161,27 +161,59 @@ class BoundaryHandler:
         # Wind BC hyperviscosity parameter
         self._wind_bc_hyperviscosity: float = 0.0
 
-    def compute_outward_normal(self, point_idx: int) -> np.ndarray:
-        """
-        Compute outward normal vector at a boundary point.
+    def compute_outward_normal(self, point_idx: int, tolerance: float = 1e-6) -> np.ndarray:
+        """Compute outward normal vector at a single boundary point.
 
-        For rectangular domains, the normal is determined by which boundary
-        the point lies on. For corner points (on multiple boundaries), returns
-        the average of all boundary normals.
+        Routes through ``BoundaryConditions.identify_boundary_face`` +
+        ``outward_normal_for_face`` when a ``BoundaryConditions`` object is
+        attached — the canonical PR #1097 / Issue #1098 path with closed-
+        inequality tolerance and exact face-derived ±1 unit normal. Falls
+        back to ``compute_normal_from_bounds`` (legacy axis-aligned with
+        strict ``<`` and ``tol=1e-10``) only when no BC object is present,
+        which is the only case the legacy path was correct for anyway.
 
-        Delegates to geometry/boundary/ghost.compute_normal_from_bounds().
+        This is the **single-point sibling** of ``compute_boundary_normals``
+        (the bulk method also migrated by PR #1097). Both methods must use
+        the same classification to avoid the dual-source bug class
+        (G-013-style): if bulk and single-point produce different normals
+        for the same point, every downstream consumer that mixes calls is
+        a latent bug surface.
+
+        Issue #1110 Bug B: ``create_ghost_neighbors`` calls this method with
+        ε-off-wall boundary points; before this fix, ``compute_normal_from_
+        bounds`` returned ``[0, 0]`` (tol=1e-10 < ε=1e-6), so ghost
+        augmentation silently emitted zero ghosts.
 
         Parameters
         ----------
         point_idx : int
-            Index of boundary point
+            Index of boundary point.
+        tolerance : float
+            Closed-inequality tolerance for face classification (default
+            1e-6, matched to ``BoundaryConditions.identify_boundary_face``).
 
         Returns
         -------
         np.ndarray
-            Unit outward normal vector, shape (dimension,)
+            Unit outward normal vector, shape (dimension,).
         """
         point = self.collocation_points[point_idx]
+        if self.boundary_conditions is not None:
+            try:
+                face = self.boundary_conditions.identify_boundary_face(
+                    point=point,
+                    tolerance=tolerance,
+                    domain_bounds=np.asarray(self.domain_bounds, dtype=float)
+                    if self.domain_bounds is not None
+                    else None,
+                )
+                if face is not None:
+                    return self.boundary_conditions.outward_normal_for_face(face, dimension=self.dimension)
+            except AttributeError:
+                # Older BC objects without identify_boundary_face / outward_
+                # normal_for_face — fall through to legacy.
+                pass
+        # Legacy fallback for setups with no BC object attached.
         return compute_normal_from_bounds(point, self.domain_bounds)
 
     def compute_boundary_normals(self, tolerance: float = 1e-6) -> np.ndarray | None:
@@ -597,43 +629,73 @@ class BoundaryHandler:
 
         return ghost_points, ghost_indices, interior_indices
 
-    def apply_ghost_nodes_to_neighborhoods(self) -> None:
-        """
-        Apply ghost nodes method to boundary point neighborhoods.
+    def apply_ghost_nodes_to_neighborhoods(self, bc_type_for_point: Callable[[int], str] | None = None) -> None:
+        """Apply ghost-node augmentation to boundary point neighborhoods.
 
-        For each boundary point with Neumann BC, augments the neighborhood with
-        ghost neighbors that enforce du/dn = 0 structurally through symmetry.
+        For each boundary point classified as Neumann/no-flux, augments the
+        neighborhood with mirror-image ghost neighbors that structurally
+        enforce du/dn = 0. Skipped for Dirichlet (e.g. exit) segments.
+
+        **Per-point dispatch (Issue #1110 Bug A fix)**: when
+        ``bc_type_for_point`` is provided, the per-point classification is
+        consulted for each boundary point individually. This handles mixed
+        BC correctly (apply ghost to wall segments only, skip exit). When
+        not provided, falls back to the legacy global ``_bc_property_
+        getter("type")`` check — correct only for uniform BC. Previously
+        this method returned early on any mixed-BC setup (the global type
+        is not uniform, fallback hit ``default_bc=PERIODIC``, the check
+        ``bc_type in ("neumann", "no_flux")`` failed, and ghost augmentation
+        silently did nothing on every mixed-BC user).
 
         Must be called after neighborhood structure is built and before
         Taylor matrix construction.
 
+        Parameters
+        ----------
+        bc_type_for_point : Callable[[int], str] | None
+            Per-point BC type resolver (returns "neumann"/"no_flux"/
+            "dirichlet"/etc. for a given collocation point index). The
+            HJBGFDMSolver passes ``self._get_bc_type_for_point`` which
+            after PR #1097 reads from the pre-classified table.
+
         Issue #531: Terminal BC compatibility fix.
+        Issue #1110: per-point dispatch for mixed BC.
         """
         if len(self.boundary_indices) == 0:
             return
 
-        # Get BC type
-        bc_type_val = self._bc_property_getter("type", None)
+        if bc_type_for_point is None:
+            # Legacy uniform-BC path (kept for backward compat)
+            bc_type_val = self._bc_property_getter("type", None)
+            if bc_type_val is not None:
+                global_bc_type = bc_type_val.lower() if isinstance(bc_type_val, str) else str(bc_type_val).lower()
+            else:
+                try:
+                    from mfgarchon.geometry.boundary import BCType
 
-        if bc_type_val is not None:
-            bc_type = bc_type_val.lower() if isinstance(bc_type_val, str) else str(bc_type_val).lower()
-        else:
-            # Try to infer from BoundaryConditions object
-            try:
-                from mfgarchon.geometry.boundary import BCType
-
-                default_bc = self.boundary_conditions.default_bc
-                bc_type = default_bc.value.lower() if isinstance(default_bc, BCType) else str(default_bc).lower()
-            except AttributeError:
+                    default_bc = self.boundary_conditions.default_bc
+                    global_bc_type = (
+                        default_bc.value.lower() if isinstance(default_bc, BCType) else str(default_bc).lower()
+                    )
+                except AttributeError:
+                    return
+            # Uniform: ghost nodes only apply to Neumann/no-flux
+            if global_bc_type not in ("neumann", "no_flux"):
                 return
+            bc_type_for_point = lambda _i: global_bc_type  # noqa: E731
 
-        # Ghost nodes only apply to Neumann BC
-        if bc_type not in ("neumann", "no_flux"):
-            return
-
-        boundary_set = set(self.boundary_indices)
+        boundary_set = {int(i) for i in self.boundary_indices}
 
         for i in boundary_set:
+            # Per-point BC type — skip Dirichlet (exit) segments
+            try:
+                pt_bc_type = bc_type_for_point(int(i))
+            except (KeyError, ValueError):
+                # Point not classified (e.g. boundary_indices mutated); skip
+                # rather than fall through to wrong default
+                continue
+            if pt_bc_type not in ("neumann", "no_flux"):
+                continue
             # Get existing neighborhood
             neighborhood = self.neighborhoods[i]
             neighbor_points = neighborhood["points"]
