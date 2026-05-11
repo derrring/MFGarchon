@@ -1811,9 +1811,21 @@ class HJBGFDMSolver(BaseHJBSolver):
         elif self._precomputed_stencils is not None and self._precomputed_stencils.has_stencil(point_idx):
             precomputed = self._precomputed_stencils.get_laplacian_weights(point_idx)
             if precomputed is not None:
-                L_w = precomputed[0]  # shape (n_neighbors,)
+                L_w = precomputed[0]  # shape (n_precomp_neighbors,)
+                precomp_nbr = precomputed[1]
+                # Rebuild b on the PRECOMP stencil. When runtime
+                # ``self.neighborhoods[i]["indices"]`` has been augmented
+                # (ghost-node reflection points, or adaptive δ-enlargement),
+                # its length differs from the precomp stencil that L_w was
+                # built on. Contracting ``L_w @ b`` of mismatched length
+                # produced ``ValueError: matmul: size N is different from
+                # K`` (Issue #1102, G-013 pattern). The fix re-evaluates
+                # ``b = u_neighbors - u_center`` on precomp's stored
+                # ``neighbor_indices`` (cloud-only, no ghosts), aligning
+                # with L_w's stencil source.
+                b_precomp = u_values[precomp_nbr] - u_center
                 # M-matrix QP only corrects the Laplacian; gradient stays bare W-T.
-                target_lap = float(L_w @ b)
+                target_lap = float(L_w @ b_precomp)
                 current_lap = sum(
                     float(derivatives.get(beta, 0.0))
                     for beta in self.multi_indices
