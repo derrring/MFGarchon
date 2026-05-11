@@ -25,7 +25,7 @@ from mfgarchon.alg.numerical.gfdm_components.gfdm_strategies import (
     create_operator,
 )
 from mfgarchon.geometry.boundary.applicator_base import DiscretizationType
-from mfgarchon.geometry.boundary.types import BCType
+from mfgarchon.geometry.boundary.types import BCSegment, BCType, BoundaryFace
 from mfgarchon.utils.deprecation import deprecated_parameter, deprecated_value
 from mfgarchon.utils.mfg_logging import get_logger
 from mfgarchon.utils.numerical.qp_utils import QPCache, QPSolver
@@ -766,6 +766,12 @@ class HJBGFDMSolver(BaseHJBSolver):
             # Create unified BC config (single source of truth)
             self._bc_config = self._boundary_handler.create_bc_config()
 
+            # Pre-classify every boundary collocation point to (BoundaryFace,
+            # BCSegment) at construction time. Fails fast if any point cannot
+            # be matched — better diagnostic than discovering it as a zero
+            # Jacobian row 80 Newton iters later.
+            self._preclassify_boundary_points()
+
             # Initialize NeighborhoodBuilder component (Issue #545: composition over mixins)
             # This component handles stencil construction, Taylor matrices, weight functions
             self._neighborhood_builder = NeighborhoodBuilder(
@@ -1037,69 +1043,157 @@ class HJBGFDMSolver(BaseHJBSolver):
     def _get_bc_type_for_point(self, point_idx: int) -> str:
         """Determine BC type for a boundary collocation point.
 
-        For mixed BC (like multi-exit), determines if point is at:
-        - Exit (DIRICHLET): absorbing boundary
-        - Wall (NEUMANN/NO_FLUX): reflecting boundary
+        Resolution order:
 
-        Args:
-            point_idx: Index of boundary collocation point
+        1. **Pre-classified table** (preferred): for mixed BC, the segment
+           was resolved at solver __init__ time and stored in
+           ``self._bc_segment_per_point``. O(1) lookup, no re-classification.
+        2. **Uniform BC**: read global type from ``_bc_config``.
+
+        For mixed BC where the point was *not* pre-classified, this method
+        raises ``ValueError`` rather than silently falling back to
+        ``self.boundary_conditions.default_bc`` (which defaults to PERIODIC
+        — historically the source of silent zero Jacobian rows). The
+        pre-classification at __init__ already raised on unmatched points
+        with full diagnostic; reaching here means the boundary_indices set
+        was mutated after __init__, which is a programmer error.
 
         Returns:
-            BC type string: "dirichlet" or "neumann"
+            BC type string: "dirichlet", "neumann", or any other BCType
+            ``.value.lower()`` for completeness.
         """
-        # Get global BC type from config (handles uniform BC case)
-        bc_type = self._bc_config.get("type") if self._bc_config else None
-
-        # Check if mixed BC - use try/except instead of hasattr
         try:
             is_mixed = self.boundary_conditions.is_mixed
         except AttributeError:
-            # Not a BoundaryConditions object - use global type
-            if bc_type is None:
-                raise ValueError("BC type required but not specified in config.") from None
-            return bc_type
+            is_mixed = False
 
+        if is_mixed:
+            # Pre-classified table is authoritative for mixed BC.
+            try:
+                segment = self._bc_segment_per_point[point_idx]
+            except (AttributeError, KeyError) as exc:
+                raise ValueError(
+                    f"_get_bc_type_for_point({point_idx}): point not in pre-classified "
+                    f"table. boundary_indices was likely mutated after solver __init__, "
+                    f"or this method was called before HJBGFDMSolver.__init__ completed. "
+                    f"Pre-classified count: "
+                    f"{len(getattr(self, '_bc_segment_per_point', {}))}/"
+                    f"{len(self.boundary_indices)}."
+                ) from exc
+            if segment.bc_type == BCType.DIRICHLET:
+                return "dirichlet"
+            if segment.bc_type in (BCType.NEUMANN, BCType.NO_FLUX):
+                return "neumann"
+            return segment.bc_type.value.lower()
+
+        # Uniform BC: global type from config.
+        bc_type = self._bc_config.get("type") if self._bc_config else None
+        if bc_type is None:
+            raise ValueError(
+                "BC type required but not specified in config (uniform BC path). "
+                "Provide boundary_conditions= when constructing HJBGFDMSolver."
+            )
+        return bc_type
+
+    def _preclassify_boundary_points(self) -> None:
+        """Pre-classify every boundary collocation point to a BCSegment + face + normal.
+
+        Called once at __init__ time. Populates three companion maps:
+
+        - ``self._bc_face_per_point[i]``: BoundaryFace the point lies on.
+        - ``self._bc_segment_per_point[i]``: BCSegment that applies to ``i``.
+        - ``self._bc_normal_per_point[i]``: outward unit normal (axis-aligned,
+          from the face — not from any SDF gradient).
+
+        Raises if any boundary point cannot be classified to a face or matched
+        to a segment. This converts a class of latent failures — silent
+        ``default_bc=PERIODIC`` fallback plus zero Jacobian rows discovered
+        80 Newton iterations later — into a loud, diagnosable construction-
+        time error.
+
+        Only runs for mixed-BC setups; uniform BC keeps the global-type fast
+        path. Skipped entirely if ``len(self.boundary_indices) == 0``.
+        """
+        self._bc_face_per_point: dict[int, BoundaryFace] = {}
+        self._bc_segment_per_point: dict[int, BCSegment] = {}
+        self._bc_normal_per_point: dict[int, np.ndarray] = {}
+
+        if len(self.boundary_indices) == 0 or self.boundary_conditions is None:
+            return
+        try:
+            is_mixed = self.boundary_conditions.is_mixed
+        except AttributeError:
+            return
         if not is_mixed:
-            if bc_type is None:
-                raise ValueError("BC type required but not specified in config.")
-            return bc_type
+            return
 
-        # Mixed BC - delegate to BCSegment.matches_point() for proper matching
-        # This supports rectangular, SDF-based, and normal-direction matching
-        point = self.collocation_points[point_idx]
-
-        # Prepare context for matching (Issue #542 fix - support general geometries)
-        domain_bounds = self._get_domain_bounds_array()
-        boundary_id = self._infer_boundary_id(point, domain_bounds)
-        domain_sdf = self._get_domain_sdf()
-
-        # Sort segments by priority (higher priority first)
+        bounds = self._get_domain_bounds_array()
         sorted_segments = sorted(
             self.boundary_conditions.segments,
             key=lambda seg: seg.priority,
             reverse=True,
         )
 
-        # Find first matching segment
-        from mfgarchon.geometry.boundary import BCType
+        # tolerance for classification: 1e-6 covers ε=1e-6 collocation
+        # generators (e.g. SDF-clipped boundary points placed at micron
+        # distance from the wall). Users with looser collocation can override
+        # via a future kwarg; current default is conservative.
+        tol = 1e-6
+        unmatched: list[tuple[int, np.ndarray, BoundaryFace | None, str]] = []
 
-        for segment in sorted_segments:
-            if segment.matches_point(
+        for i in self.boundary_indices:
+            i = int(i)
+            point = self.collocation_points[i]
+
+            face = self.boundary_conditions.identify_boundary_face(
                 point=point,
-                boundary_id=boundary_id,
-                domain_bounds=domain_bounds,
-                domain_sdf=domain_sdf,
-            ):
-                # Map BCType to string for solver
-                if segment.bc_type == BCType.DIRICHLET:
-                    return "dirichlet"
-                elif segment.bc_type in (BCType.NEUMANN, BCType.NO_FLUX):
-                    return "neumann"
-                else:
-                    return segment.bc_type.value.lower()
+                tolerance=tol,
+                domain_bounds=bounds,
+            )
+            if face is None:
+                unmatched.append((i, point, None, "no BoundaryFace match"))
+                continue
 
-        # No segment match - use default BC
-        return self.boundary_conditions.default_bc.value.lower()
+            matching_segment: BCSegment | None = None
+            for seg in sorted_segments:
+                if seg.matches_point(
+                    point=point,
+                    boundary_id=face.to_string(),
+                    domain_bounds=bounds,
+                ):
+                    matching_segment = seg
+                    break
+
+            if matching_segment is None:
+                unmatched.append((i, point, face, f"BoundaryFace={face!r} not covered by any segment"))
+                continue
+
+            self._bc_face_per_point[i] = face
+            self._bc_segment_per_point[i] = matching_segment
+            self._bc_normal_per_point[i] = self.boundary_conditions.outward_normal_for_face(
+                face, dimension=self.dimension
+            )
+
+        if unmatched:
+            lines = [
+                f"HJBGFDMSolver: BC pre-classification failed for "
+                f"{len(unmatched)}/{len(self.boundary_indices)} boundary points.",
+                "",
+                "Common causes:",
+                f"  1. Collocation generator places boundary points >{tol:.0e} off the wall "
+                "(e.g. ε=1e-4 with default tol=1e-6) → bump tolerance, or shrink ε.",
+                "  2. BoundaryConditions.segments don't cover every geometric face → add "
+                "a segment for the missing face, or set boundary='all'.",
+                "  3. domain_bounds inferred from problem.geometry differ from collocation "
+                "extent (e.g. quirky obstacle-clipping geometry).",
+                "",
+                "Unmatched points (first 5):",
+            ]
+            for i, point, face, reason in unmatched[:5]:
+                lines.append(f"  pt {i} at {point.tolist()}: face={face!r} -- {reason}")
+            if len(unmatched) > 5:
+                lines.append(f"  ... and {len(unmatched) - 5} more")
+            raise ValueError("\n".join(lines))
 
     def _detect_boundary_indices(self, collocation_points: np.ndarray) -> np.ndarray:
         """Auto-detect boundary point indices from collocation points and domain bounds.
@@ -2175,122 +2269,212 @@ class HJBGFDMSolver(BaseHJBSolver):
         return jacobian.tocsr()
 
     def _apply_boundary_conditions_to_sparse_system(self, jacobian_sparse, residual: np.ndarray, time_idx: int):
-        """
-        Apply boundary conditions to sparse Jacobian using Row Replacement pattern.
+        """Apply boundary conditions to the sparse Jacobian via row replacement.
 
-        This implements the "Direct Collocation" approach recommended in GFDM literature:
-        - For interior points: PDE equation rows (already set)
-        - For boundary points: Replace PDE rows with BC equation rows
+        Two dispatch paths:
 
-        For Dirichlet: Row becomes identity (u_i = g)
-        For Neumann: Row becomes normal derivative operator (∂u/∂n = 0)
+        - **Mixed BC (per-point)**: every boundary point has been pre-classified
+          at solver __init__ time to a (BCSegment, outward_normal) pair stored in
+          ``self._bc_segment_per_point`` and ``self._bc_normal_per_point``. This
+          method consumes those maps for O(1) lookup. If a point is missing from
+          the map (only possible if pre-classification raised), we get a KeyError
+          rather than a silent zero-row.
+
+        - **Uniform BC**: legacy fast path using ``_bc_config["type"]`` and
+          ``_bc_config["normals"]`` arrays indexed by ``local_idx``.
+
+        BC type dispatch is now an exhaustive ``match`` over ``BCType`` with
+        ``case _: raise``, so any unhandled enum value surfaces immediately
+        rather than silently leaving a cleared zero row. PERIODIC and ROBIN
+        raise ``NotImplementedError`` because this solver doesn't support them
+        via row replacement (see error messages for alternatives).
+
+        Row construction is **atomic**: we build the full replacement row in a
+        local ``np.ndarray`` and assign in one shot, instead of clearing first
+        and then conditionally refilling.
         """
         if len(self.boundary_indices) == 0:
             return jacobian_sparse, residual
 
-        # Convert to LIL format for efficient row modification (O(nnz) not O(n²))
         jac_lil = jacobian_sparse.tolil()
         residual_bc = residual.copy()
 
-        # Apply BC directly on sparse matrix (avoid dense conversion)
-        # For mixed BC, we use per-point BC types; for uniform BC, use global type
-        global_bc_type = self._get_boundary_condition_property("type")
         try:
             use_per_point_bc = self.boundary_conditions.is_mixed
         except AttributeError:
             use_per_point_bc = False
-        bc_values = self._get_boundary_condition_property("values")
-        normals = self._bc_config.get("normals", None) if self._bc_config else None
+
+        # Legacy uniform-BC scaffold
+        global_bc_type = self._get_boundary_condition_property("type") if not use_per_point_bc else None
+        legacy_bc_values = self._get_boundary_condition_property("values") if not use_per_point_bc else None
+        legacy_normals = self._bc_config.get("normals", None) if not use_per_point_bc and self._bc_config else None
+        bc_str_to_enum = {
+            "dirichlet": BCType.DIRICHLET,
+            "neumann": BCType.NEUMANN,
+            "no_flux": BCType.NO_FLUX,
+            "periodic": BCType.PERIODIC,
+            "robin": BCType.ROBIN,
+        }
+
         dimension = self.dimension
+        n = self.n_points
+        # Time coordinate for callable BC values
+        current_time = time_idx * (self.problem.T / self.problem.Nt) if getattr(self.problem, "Nt", 0) > 0 else 0.0
 
         for local_idx, i in enumerate(self.boundary_indices):
-            # Determine BC type for this point (per-point for mixed, global otherwise)
+            i = int(i)
+
+            # --- Resolve BC for this point ---
             if use_per_point_bc:
-                bc_type = self._get_bc_type_for_point(i)
+                segment = self._bc_segment_per_point[i]
+                bc_enum = segment.bc_type
+                normal = self._bc_normal_per_point[i]
             else:
-                bc_type = global_bc_type if global_bc_type else "neumann"
-
-            # Clear row (LIL supports efficient row clearing)
-            jac_lil[i, :] = 0.0
-
-            if bc_type == "dirichlet":
-                # Dirichlet: u = g
-                jac_lil[i, i] = 1.0
-                if isinstance(bc_values, dict):
-                    residual_bc[i] = bc_values.get(i, 0.0)
-                elif callable(bc_values):
-                    residual_bc[i] = bc_values(self.collocation_points[i])
+                bc_str = (global_bc_type or "neumann").lower()
+                if bc_str not in bc_str_to_enum:
+                    raise ValueError(
+                        f"Unknown BC type {bc_str!r} at boundary point {i} (uniform path). "
+                        f"Supported: {tuple(bc_str_to_enum)}."
+                    )
+                bc_enum = bc_str_to_enum[bc_str]
+                segment = None
+                if legacy_normals is not None and local_idx < len(legacy_normals):
+                    normal = legacy_normals[local_idx]
+                elif self._boundary_handler is not None:
+                    normal = self._boundary_handler.compute_outward_normal(i)
                 else:
-                    residual_bc[i] = float(bc_values) if bc_values else 0.0
+                    normal = self._compute_outward_normal(i)
 
-            elif bc_type in ("neumann", "no_flux"):
-                # Neumann: du/dn = g
-                # Skip row replacement if ghost nodes are active - BC is enforced structurally
+            # --- Ghost-nodes structural BC: keep PDE row intact ---
+            if bc_enum in (BCType.NEUMANN, BCType.NO_FLUX):
                 if (
                     self._use_ghost_nodes
                     and self._boundary_handler is not None
                     and i in self._boundary_handler.ghost_node_map
                 ):
-                    # Ghost nodes enforce Neumann BC through symmetric stencils
-                    # Keep the original PDE row (already set in Jacobian)
-                    # Restore the row from the original Jacobian (undo the clearing above)
-                    jac_lil[i, :] = jacobian_sparse[i, :].toarray().flatten()
-                    # Residual also stays as-is (PDE residual)
+                    # Symmetric ghost stencils enforce BC structurally; leave row.
                     continue
 
-                # For LCR boundary points, use our LCR-corrected weights (Issue #531)
-                if (
-                    self._use_local_coordinate_rotation
-                    and self._boundary_handler is not None
-                    and i in self._boundary_handler.boundary_rotations
-                ):
-                    if self._neighborhood_builder is not None:
-                        boundary_rotations = (
-                            self._boundary_handler.boundary_rotations if self._boundary_handler else None
-                        )
-                        weights = self._neighborhood_builder.compute_derivative_weights_from_taylor(
-                            i, boundary_rotations
-                        )
-                    else:
-                        # Legacy fallback
-                        weights = self._compute_derivative_weights_from_taylor(i)
-                else:
-                    weights = self._gfdm_operator.get_derivative_weights(i)
+            # --- Build replacement row + rhs (atomic) ---
+            match bc_enum:
+                case BCType.DIRICHLET:
+                    new_row = np.zeros(n)
+                    new_row[i] = 1.0
+                    new_rhs = self._eval_bc_dirichlet_value(i, segment, legacy_bc_values, current_time)
+                case BCType.NEUMANN | BCType.NO_FLUX:
+                    new_row, new_rhs = self._build_neumann_bc_row(
+                        i, normal, dimension, segment, legacy_bc_values, current_time
+                    )
+                case BCType.PERIODIC:
+                    raise NotImplementedError(
+                        f"PERIODIC BC at boundary point {i} not supported by HJBGFDMSolver "
+                        f"via row replacement. Use TensorProductGrid + FDM for periodic "
+                        f"geometries, or rephrase as paired Dirichlet/Neumann segments."
+                    )
+                case BCType.ROBIN:
+                    raise NotImplementedError(
+                        f"ROBIN BC at boundary point {i} not supported by HJBGFDMSolver "
+                        f"via row replacement. Use the BCValueProvider pattern in the "
+                        f"coupling layer (Issue #625, see AdjointConsistentProvider)."
+                    )
+                case _:
+                    raise ValueError(
+                        f"Unhandled BCType {bc_enum!r} at boundary point {i}. "
+                        f"This indicates a new BCType value not yet wired into "
+                        f"HJBGFDMSolver._apply_boundary_conditions_to_sparse_system."
+                    )
 
-                if weights is None:
-                    jac_lil[i, i] = 1.0
-                    residual_bc[i] = 0.0
-                    continue
-
-                neighbor_indices = weights["neighbor_indices"]
-                grad_weights = weights["grad_weights"]
-
-                # Get normal vector
-                if normals is not None and local_idx < len(normals):
-                    normal = normals[local_idx]
-                else:
-                    if self._boundary_handler is not None:
-                        normal = self._boundary_handler.compute_outward_normal(i)
-                    else:
-                        # Legacy fallback
-                        normal = self._compute_outward_normal(i)
-
-                # Normal derivative: du/dn = n . grad(u)
-                center_weight = 0.0
-                for k, j in enumerate(neighbor_indices):
-                    if j >= 0 and j != i:
-                        weight = sum(normal[d] * grad_weights[d, k] for d in range(dimension))
-                        jac_lil[i, j] = weight
-                        center_weight -= weight
-
-                jac_lil[i, i] = center_weight
-
-                if isinstance(bc_values, dict):
-                    residual_bc[i] = bc_values.get(i, 0.0)
-                else:
-                    residual_bc[i] = 0.0  # No-flux default
+            # --- Atomic row replacement ---
+            jac_lil[i, :] = new_row
+            residual_bc[i] = new_rhs
 
         return jac_lil.tocsr(), residual_bc
+
+    def _eval_bc_dirichlet_value(
+        self,
+        point_idx: int,
+        segment: BCSegment | None,
+        legacy_bc_values,
+        current_time: float,
+    ) -> float:
+        """Resolve a Dirichlet RHS value for boundary point ``point_idx``.
+
+        Prefers ``segment.get_value(point, t)`` when a segment is supplied
+        (pre-classified path); falls back to legacy ``bc_values`` (dict,
+        callable, or scalar) for the uniform-BC path.
+        """
+        if segment is not None:
+            return float(segment.get_value(self.collocation_points[point_idx], t=current_time))
+        if isinstance(legacy_bc_values, dict):
+            return float(legacy_bc_values.get(point_idx, 0.0))
+        if callable(legacy_bc_values):
+            return float(legacy_bc_values(self.collocation_points[point_idx]))
+        return float(legacy_bc_values) if legacy_bc_values else 0.0
+
+    def _build_neumann_bc_row(
+        self,
+        point_idx: int,
+        normal: np.ndarray,
+        dimension: int,
+        segment: BCSegment | None,
+        legacy_bc_values,
+        current_time: float,
+    ) -> tuple[np.ndarray, float]:
+        """Build the (row, rhs) for a Neumann / no-flux BC at ``point_idx``.
+
+        Row encodes ``normal · grad(u) ≈ Σ_j (normal · grad_weights[:,k]) u_j``,
+        so the linear system row is ``[..., w_j, ..., center_weight, ...]``.
+        RHS is the prescribed normal-derivative value (0 for no-flux).
+
+        LCR (local coordinate rotation, Issue #531) and ghost-node paths
+        choose the gradient stencil; ghost-node short-circuit happens in the
+        caller before this is invoked.
+        """
+        if (
+            self._use_local_coordinate_rotation
+            and self._boundary_handler is not None
+            and point_idx in self._boundary_handler.boundary_rotations
+        ):
+            if self._neighborhood_builder is not None:
+                boundary_rotations = self._boundary_handler.boundary_rotations
+                weights = self._neighborhood_builder.compute_derivative_weights_from_taylor(
+                    point_idx, boundary_rotations
+                )
+            else:
+                weights = self._compute_derivative_weights_from_taylor(point_idx)
+        else:
+            weights = self._gfdm_operator.get_derivative_weights(point_idx)
+
+        n = self.n_points
+        new_row = np.zeros(n)
+
+        if weights is None:
+            # Degenerate stencil — preserve legacy behavior: pin to identity
+            # row with zero RHS rather than producing a zero row. A warning
+            # might be more honest, but matches existing semantics.
+            new_row[point_idx] = 1.0
+            return new_row, 0.0
+
+        neighbor_indices = weights["neighbor_indices"]
+        grad_weights = weights["grad_weights"]
+
+        center_weight = 0.0
+        for k, j in enumerate(neighbor_indices):
+            if j >= 0 and j != point_idx:
+                w = sum(normal[d] * grad_weights[d, k] for d in range(dimension))
+                new_row[j] = w
+                center_weight -= w
+        new_row[point_idx] = center_weight
+
+        # RHS: segment.get_value at this point, or legacy dict lookup, else 0
+        if segment is not None:
+            rhs = float(segment.get_value(self.collocation_points[point_idx], t=current_time))
+        elif isinstance(legacy_bc_values, dict):
+            rhs = float(legacy_bc_values.get(point_idx, 0.0))
+        else:
+            rhs = 0.0
+
+        return new_row, rhs
 
     def _get_lambda_value(self) -> float:
         """

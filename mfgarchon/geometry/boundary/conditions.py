@@ -411,7 +411,12 @@ class BoundaryConditions:
         # No match - return default value
         return self.default_value
 
-    def identify_boundary_face(self, point: np.ndarray, tolerance: float = 1e-8) -> BoundaryFace | None:
+    def identify_boundary_face(
+        self,
+        point: np.ndarray,
+        tolerance: float = 1e-6,
+        domain_bounds: np.ndarray | None = None,
+    ) -> BoundaryFace | None:
         """
         Identify which boundary face a point lies on (dimension-agnostic).
 
@@ -419,23 +424,53 @@ class BoundaryConditions:
         or normal-based face for SDF domains.
 
         Args:
-            point: Spatial coordinates
-            tolerance: Tolerance for boundary detection
+            point: Spatial coordinates.
+            tolerance: Closed-inequality tolerance for boundary detection
+                (``|point[axis] - bound| <= tolerance``). Default 1e-6 covers
+                collocation generators that place boundary points at ε=1e-6
+                off the wall to avoid SDF coincidence. Adjust larger if your
+                collocation ε is larger.
+            domain_bounds: Optional override for axis-aligned bounds. If
+                supplied, takes precedence over ``self.domain_bounds`` for
+                this call only. Useful when a solver knows the geometry
+                bounds but the BC spec doesn't carry them.
 
         Returns:
-            BoundaryFace or None if not on boundary
+            BoundaryFace or None if not on boundary.
+
+        Note:
+            Uses ``<=`` (closed inequality) rather than ``<`` (strict). With
+            strict ``<``, a point at exactly ``tolerance`` distance from the
+            wall would fall through to None — and floating-point rounding
+            decides whether two symmetric walls classify identically.
         """
         dimension = self._require_dimension("identify_boundary_face")
         point = np.asarray(point, dtype=float)
 
-        # Method 1: Rectangular domain (axis-aligned detection)
-        if self.domain_bounds is not None:
+        # Prefer caller-supplied bounds when provided
+        bounds = domain_bounds if domain_bounds is not None else self.domain_bounds
+
+        # Method 1: Rectangular domain (axis-aligned detection).
+        # Use hybrid absolute+relative tolerance to absorb floating-point
+        # arithmetic noise at non-trivial bound magnitudes. Example: at
+        # bound=20, `(20.0 - 1e-6) - 20.0` computes to ~1.0000000003e-6
+        # (3e-14 above the mathematical 1e-6) purely from FP subtraction
+        # error. A small relative term (1e-12 * |bound|) absorbs this while
+        # remaining far below any realistic interior-point distance.
+        if bounds is not None:
+            bounds = np.asarray(bounds, dtype=float)
             for axis_idx in range(dimension):
-                if abs(point[axis_idx] - self.domain_bounds[axis_idx, 0]) < tolerance:
+                low, high = bounds[axis_idx, 0], bounds[axis_idx, 1]
+                tol_low = tolerance + abs(low) * 1e-12
+                tol_high = tolerance + abs(high) * 1e-12
+                if abs(point[axis_idx] - low) <= tol_low:
                     return BoundaryFace(axis_idx, "min")
-                if abs(point[axis_idx] - self.domain_bounds[axis_idx, 1]) < tolerance:
+                if abs(point[axis_idx] - high) <= tol_high:
                     return BoundaryFace(axis_idx, "max")
-            return None
+            # Not on any axis-aligned face; fall through to SDF only if
+            # bounds came from self (i.e., caller hasn't asserted bounds-only).
+            if domain_bounds is not None:
+                return None
 
         # Method 2: SDF domain (normal-based detection)
         if self.domain_sdf is not None:
@@ -453,9 +488,41 @@ class BoundaryConditions:
             side = "max" if normal[dominant_axis] > 0 else "min"
             return BoundaryFace(dominant_axis, side)
 
-        raise ValueError("Either domain_bounds or domain_sdf must be set")
+        if bounds is None:
+            raise ValueError("Either domain_bounds or domain_sdf must be set")
+        return None
 
-    def identify_boundary_id(self, point: np.ndarray, tolerance: float = 1e-8) -> str | None:
+    def outward_normal_for_face(
+        self,
+        face: BoundaryFace,
+        dimension: int | None = None,
+    ) -> np.ndarray:
+        """Outward unit normal for an axis-aligned boundary face.
+
+        Pure function of the face — no SDF gradient, no tolerance, no
+        ambiguity. Use this when the caller has already classified the
+        point to a face (e.g., via :meth:`identify_boundary_face`):
+        avoids re-running classification and avoids the SDF-gradient path
+        which mis-fires on Difference-style domains where ``domain_sdf``
+        is the *obstacle* SDF rather than the outer box's.
+
+        Args:
+            face: BoundaryFace(axis, side) the point lies on.
+            dimension: Optional dimension override. Defaults to
+                ``self.dimension``.
+
+        Returns:
+            Unit outward normal vector of shape (dimension,). Outward
+            means *away from the interior* — for an axis-aligned face,
+            ``normal[axis] = -1`` if side is "min", ``+1`` if "max"; all
+            other entries are zero.
+        """
+        d = dimension if dimension is not None else self._require_dimension("outward_normal_for_face")
+        normal = np.zeros(d, dtype=float)
+        normal[face.axis] = 1.0 if face.side == "max" else -1.0
+        return normal
+
+    def identify_boundary_id(self, point: np.ndarray, tolerance: float = 1e-6) -> str | None:
         """
         Identify which boundary a point lies on (legacy string interface).
 
@@ -464,7 +531,8 @@ class BoundaryConditions:
 
         Args:
             point: Spatial coordinates
-            tolerance: Tolerance for boundary detection
+            tolerance: Tolerance for boundary detection (default 1e-6, matched
+                to identify_boundary_face).
 
         Returns:
             Boundary identifier string or None if not on boundary

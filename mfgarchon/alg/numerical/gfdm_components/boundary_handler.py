@@ -184,12 +184,34 @@ class BoundaryHandler:
         point = self.collocation_points[point_idx]
         return compute_normal_from_bounds(point, self.domain_bounds)
 
-    def compute_boundary_normals(self) -> np.ndarray | None:
-        """
-        Compute outward normal vectors for all boundary points.
+    def compute_boundary_normals(self, tolerance: float = 1e-6) -> np.ndarray | None:
+        """Compute outward normal vectors for all boundary points.
 
-        Tries to use geometry infrastructure (BoundaryConditions.get_outward_normal)
-        first, falls back to axis-aligned computation for rectangular domains.
+        Resolution order:
+
+        1. **BoundaryConditions.identify_boundary_face** + **outward_normal_for_face**:
+           on a rectangular (or hybrid) domain, classify the point to an
+           axis-aligned face and emit the face-derived ±1 normal. This is
+           the canonical path; aligns with the pre-classification used by
+           HJBGFDMSolver and uses the same closed-inequality tolerance.
+        2. **BoundaryConditions.get_outward_normal** (SDF-only fallback):
+           for genuinely SDF-defined boundaries where no axis-aligned face
+           matches. Uses SDF gradient.
+        3. **compute_normal_from_bounds** (legacy, last resort): when no
+           BoundaryConditions object is attached.
+
+        Previously path 1 was missing and path 2 mis-fired on Difference-
+        style domains where ``domain_sdf`` is the *obstacle* SDF rather
+        than the outer box's, producing zero or wrong-direction normals
+        for outer-wall points. Path 3 had ``tol=1e-10`` which missed
+        boundary points placed at ε=1e-6 off-wall by collocation
+        generators.
+
+        Parameters
+        ----------
+        tolerance : float
+            Closed-inequality tolerance for face classification (default
+            1e-6, matching ``BoundaryConditions.identify_boundary_face``).
 
         Returns
         -------
@@ -201,24 +223,35 @@ class BoundaryHandler:
             return None
 
         normals = np.zeros((len(self.boundary_indices), self.dimension))
-
-        # Try to use geometry infrastructure first (supports SDF domains)
         bc_obj = self.boundary_conditions
+        bounds = np.asarray(self.domain_bounds, dtype=float) if self.domain_bounds is not None else None
 
         for local_idx, global_idx in enumerate(self.boundary_indices):
             point = self.collocation_points[global_idx]
 
-            # Try BoundaryConditions.get_outward_normal (works for SDF domains)
+            # Path 1: classify to axis-aligned face, derive normal from face.
             if bc_obj is not None:
                 try:
-                    normal = bc_obj.get_outward_normal(point)
-                    if normal is not None:
-                        normals[local_idx] = normal
+                    face = bc_obj.identify_boundary_face(point=point, tolerance=tolerance, domain_bounds=bounds)
+                except (AttributeError, TypeError):
+                    face = None
+                if face is not None:
+                    try:
+                        normals[local_idx] = bc_obj.outward_normal_for_face(face, dimension=self.dimension)
                         continue
-                except AttributeError:
-                    pass
+                    except AttributeError:
+                        pass  # older BC objects without outward_normal_for_face
 
-            # Fallback: axis-aligned computation for rectangular domains
+                # Path 2: SDF-only fallback.
+                try:
+                    normal = bc_obj.get_outward_normal(point)
+                except AttributeError:
+                    normal = None
+                if normal is not None:
+                    normals[local_idx] = normal
+                    continue
+
+            # Path 3: axis-aligned from bounds (no BC object).
             normals[local_idx] = self.compute_outward_normal(global_idx)
 
         return normals
