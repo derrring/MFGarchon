@@ -450,13 +450,22 @@ class BoundaryConditions:
         # Prefer caller-supplied bounds when provided
         bounds = domain_bounds if domain_bounds is not None else self.domain_bounds
 
-        # Method 1: Rectangular domain (axis-aligned detection)
+        # Method 1: Rectangular domain (axis-aligned detection).
+        # Use hybrid absolute+relative tolerance to absorb floating-point
+        # arithmetic noise at non-trivial bound magnitudes. Example: at
+        # bound=20, `(20.0 - 1e-6) - 20.0` computes to ~1.0000000003e-6
+        # (3e-14 above the mathematical 1e-6) purely from FP subtraction
+        # error. A small relative term (1e-12 * |bound|) absorbs this while
+        # remaining far below any realistic interior-point distance.
         if bounds is not None:
             bounds = np.asarray(bounds, dtype=float)
             for axis_idx in range(dimension):
-                if abs(point[axis_idx] - bounds[axis_idx, 0]) <= tolerance:
+                low, high = bounds[axis_idx, 0], bounds[axis_idx, 1]
+                tol_low = tolerance + abs(low) * 1e-12
+                tol_high = tolerance + abs(high) * 1e-12
+                if abs(point[axis_idx] - low) <= tol_low:
                     return BoundaryFace(axis_idx, "min")
-                if abs(point[axis_idx] - bounds[axis_idx, 1]) <= tolerance:
+                if abs(point[axis_idx] - high) <= tol_high:
                     return BoundaryFace(axis_idx, "max")
             # Not on any axis-aligned face; fall through to SDF only if
             # bounds came from self (i.e., caller hasn't asserted bounds-only).

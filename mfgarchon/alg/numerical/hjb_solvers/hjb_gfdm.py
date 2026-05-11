@@ -25,7 +25,7 @@ from mfgarchon.alg.numerical.gfdm_components.gfdm_strategies import (
     create_operator,
 )
 from mfgarchon.geometry.boundary.applicator_base import DiscretizationType
-from mfgarchon.geometry.boundary.types import BCType
+from mfgarchon.geometry.boundary.types import BCSegment, BCType, BoundaryFace
 from mfgarchon.utils.deprecation import deprecated_parameter, deprecated_value
 from mfgarchon.utils.mfg_logging import get_logger
 from mfgarchon.utils.numerical.qp_utils import QPCache, QPSolver
@@ -766,6 +766,12 @@ class HJBGFDMSolver(BaseHJBSolver):
             # Create unified BC config (single source of truth)
             self._bc_config = self._boundary_handler.create_bc_config()
 
+            # Pre-classify every boundary collocation point to (BoundaryFace,
+            # BCSegment) at construction time. Fails fast if any point cannot
+            # be matched — better diagnostic than discovering it as a zero
+            # Jacobian row 80 Newton iters later.
+            self._preclassify_boundary_points()
+
             # Initialize NeighborhoodBuilder component (Issue #545: composition over mixins)
             # This component handles stencil construction, Taylor matrices, weight functions
             self._neighborhood_builder = NeighborhoodBuilder(
@@ -1100,6 +1106,108 @@ class HJBGFDMSolver(BaseHJBSolver):
 
         # No segment match - use default BC
         return self.boundary_conditions.default_bc.value.lower()
+
+    def _preclassify_boundary_points(self) -> None:
+        """Pre-classify every boundary collocation point to a BCSegment + face + normal.
+
+        Called once at __init__ time. Populates three companion maps:
+
+        - ``self._bc_face_per_point[i]``: BoundaryFace the point lies on.
+        - ``self._bc_segment_per_point[i]``: BCSegment that applies to ``i``.
+        - ``self._bc_normal_per_point[i]``: outward unit normal (axis-aligned,
+          from the face — not from any SDF gradient).
+
+        Raises if any boundary point cannot be classified to a face or matched
+        to a segment. This converts a class of latent failures — silent
+        ``default_bc=PERIODIC`` fallback plus zero Jacobian rows discovered
+        80 Newton iterations later — into a loud, diagnosable construction-
+        time error.
+
+        Only runs for mixed-BC setups; uniform BC keeps the global-type fast
+        path. Skipped entirely if ``len(self.boundary_indices) == 0``.
+        """
+        self._bc_face_per_point: dict[int, BoundaryFace] = {}
+        self._bc_segment_per_point: dict[int, BCSegment] = {}
+        self._bc_normal_per_point: dict[int, np.ndarray] = {}
+
+        if len(self.boundary_indices) == 0 or self.boundary_conditions is None:
+            return
+        try:
+            is_mixed = self.boundary_conditions.is_mixed
+        except AttributeError:
+            return
+        if not is_mixed:
+            return
+
+        bounds = self._get_domain_bounds_array()
+        sorted_segments = sorted(
+            self.boundary_conditions.segments,
+            key=lambda seg: seg.priority,
+            reverse=True,
+        )
+
+        # tolerance for classification: 1e-6 covers ε=1e-6 collocation
+        # generators (e.g. SDF-clipped boundary points placed at micron
+        # distance from the wall). Users with looser collocation can override
+        # via a future kwarg; current default is conservative.
+        tol = 1e-6
+        unmatched: list[tuple[int, np.ndarray, BoundaryFace | None, str]] = []
+
+        for i in self.boundary_indices:
+            i = int(i)
+            point = self.collocation_points[i]
+
+            face = self.boundary_conditions.identify_boundary_face(
+                point=point,
+                tolerance=tol,
+                domain_bounds=bounds,
+            )
+            if face is None:
+                unmatched.append((i, point, None, "no BoundaryFace match"))
+                continue
+
+            matching_segment: BCSegment | None = None
+            for seg in sorted_segments:
+                if seg.matches_point(
+                    point=point,
+                    boundary_id=face.to_string(),
+                    domain_bounds=bounds,
+                ):
+                    matching_segment = seg
+                    break
+
+            if matching_segment is None:
+                unmatched.append(
+                    (i, point, face, f"BoundaryFace={face!r} not covered by any segment")
+                )
+                continue
+
+            self._bc_face_per_point[i] = face
+            self._bc_segment_per_point[i] = matching_segment
+            self._bc_normal_per_point[i] = self.boundary_conditions.outward_normal_for_face(
+                face, dimension=self.dimension
+            )
+
+        if unmatched:
+            lines = [
+                f"HJBGFDMSolver: BC pre-classification failed for "
+                f"{len(unmatched)}/{len(self.boundary_indices)} boundary points.",
+                "",
+                "Common causes:",
+                f"  1. Collocation generator places boundary points >{tol:.0e} off the wall "
+                "(e.g. ε=1e-4 with default tol=1e-6) → bump tolerance, or shrink ε.",
+                "  2. BoundaryConditions.segments don't cover every geometric face → add "
+                "a segment for the missing face, or set boundary='all'.",
+                "  3. domain_bounds inferred from problem.geometry differ from collocation "
+                "extent (e.g. quirky obstacle-clipping geometry).",
+                "",
+                "Unmatched points (first 5):",
+            ]
+            for i, point, face, reason in unmatched[:5]:
+                lines.append(f"  pt {i} at {point.tolist()}: face={face!r} -- {reason}")
+            if len(unmatched) > 5:
+                lines.append(f"  ... and {len(unmatched) - 5} more")
+            raise ValueError("\n".join(lines))
 
     def _detect_boundary_indices(self, collocation_points: np.ndarray) -> np.ndarray:
         """Auto-detect boundary point indices from collocation points and domain bounds.
