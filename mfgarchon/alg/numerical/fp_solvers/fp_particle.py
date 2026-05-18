@@ -1536,8 +1536,7 @@ class FPParticleSolver(BaseFPSolver):
                 particles_2d = new_particles.reshape(-1, 1)
                 if self._preserve_indices:
                     raise NotImplementedError(
-                        "preserve_indices=True not supported in 1D path; "
-                        "use callable-drift n-D path (Issue #1119)."
+                        "preserve_indices=True not supported in 1D path; use callable-drift n-D path (Issue #1119)."
                     )
                 remaining_2d, _n_absorbed, _, _ = self._apply_boundary_conditions_segment_aware(
                     particles_2d, [(xmin, xmin + Lx)]
@@ -2170,7 +2169,9 @@ class FPParticleSolver(BaseFPSolver):
             # Apply boundary conditions — Issue #1042 fix: route to segment-aware
             # path when BC has Dirichlet (absorbing) segments, mirroring grid-drift.
             if use_segment_aware_bc:
-                new_particles, _n_absorbed, _, absorbed_mask = self._apply_boundary_conditions_segment_aware(new_particles, bounds)
+                new_particles, _n_absorbed, _, absorbed_mask = self._apply_boundary_conditions_segment_aware(
+                    new_particles, bounds
+                )
                 particles_list[t_idx + 1] = new_particles
                 # Issue #1119: update orig_indices + build NaN-marked full array
                 if self._preserve_indices:
