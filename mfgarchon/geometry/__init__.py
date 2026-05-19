@@ -50,6 +50,7 @@ from .boundary import (
     periodic_bc,
     robin_bc,
 )
+from .cloud_geodesic import build_geodesic_field, compute_geodesic_distance
 
 # Collocation point generation
 from .collocation import (
@@ -190,6 +191,9 @@ __all__ = [
     "AMRNotImplementedError",
     "create_amr_grid",
     "is_adaptive",
+    # Cloud geodesic distance (Issue #1093)
+    "compute_geodesic_distance",
+    "build_geodesic_field",
     # Boundary-aware protocol
     "BoundaryAwareProtocol",
     "BoundaryType",

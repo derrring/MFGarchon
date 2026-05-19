@@ -39,6 +39,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `HJBGFDMSolver`; the outer `FixedPointIterator` (Picard / fictitious
   play) is unchanged — Howard replaces inner Newton only.
 
+- **`compute_geodesic_distance` and `build_geodesic_field`** in
+  `mfgarchon/geometry/cloud_geodesic.py` (Issue #1093). Geodesic distance
+  on meshfree clouds via Dijkstra on a k-NN graph with segment-sample
+  obstacle filtering, companion to the structured-grid Eikonal solvers
+  at `mfgarchon/geometry/level_set/eikonal/`.
+
+  Graduates `mfg-research/experiments/gfdm_monotonicity_audit/minors/exp09_obstacle_navigation_full/geodesic_distance.py`
+  to library status. Two functions:
+
+  - `compute_geodesic_distance(points, sources_idx, obstacles_sdf=None, k_neighbors=25, ...)`
+    returns `(N,)` geodesic distances. Edges crossing obstacles are
+    excluded via `n_segment_samples` SDF samples per edge. `obstacles_sdf`
+    follows the mfgarchon SDF convention (`sd <= 0` inside obstacle, see
+    NAMING_CONVENTIONS.md § Geometry SDF Convention). `np.inf` for points
+    unreachable through navigable region. `O(N · k)` graph build +
+    `O((N + E) log N)` Dijkstra.
+  - `build_geodesic_field(points, d_geodesic, unreachable_penalty=1.5)`
+    wraps per-point distances into a callable `g(x)` via
+    `LinearNDInterpolator` with `NearestNDInterpolator` fallback for
+    out-of-hull queries. Unreachable points (`np.inf`) are substituted
+    with `unreachable_penalty × max(finite d)` so the field stays finite
+    for downstream HJB use.
+
+  Primary use case: terminal cost `u(T, x) = 0.5 · G_s · g(x)²` for
+  obstacle-navigation problems. Bakes routing into `g(x)` so the HJB
+  solver does not need visibility-aware gradient operators or soft-wall
+  potentials to encode it.
+
+  12 unit tests cover obstacle-free correctness (Euclidean within 15%
+  for k=24), triangle inequality on the graph, multiple sources →
+  `min_s d(., s)`, obstacle inflates geodesic above Euclidean,
+  unreachable points return `np.inf`, argument validation, and
+  field-builder round-trip + out-of-hull fallback + penalty substitution.
+
 - **`preserve_indices=False` flag on `FPParticleSolver`** (Issue #1119).
   When `True`, absorbed particles are NaN-marked in the per-step trajectory
   rather than compact-removed, so `particle_history[t].shape == (num_particles, d)`
