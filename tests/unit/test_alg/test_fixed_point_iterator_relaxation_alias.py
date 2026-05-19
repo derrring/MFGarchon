@@ -1,17 +1,20 @@
-"""Equivalence tests for FixedPointIterator damping_* -> relaxation_* rename (v0.19.2).
+"""Removal-gate tests for FixedPointIterator damping_* deprecation (Issue #1070).
 
-Per CLAUDE.md deprecation policy: old API must produce identical behavior to
-new API. The legacy `damping_*` ctor kwargs are accepted via
-`@deprecated_parameter` decorators that emit `DeprecationWarning` and then
-redirect internally. Backward-compat attribute access (`iter.damping_factor`)
-is provided via silent `@property` aliases (no warning on read; loop-friendly).
+Pre-v0.25.0, FixedPointIterator accepted 7 legacy `damping_*` ctor kwargs and
+exposed 7 read-only `damping_*` `@property` aliases on instances, all
+redirecting silently to the canonical `relaxation_*` names. v0.25.0 removed
+them per the 3-version deprecation window.
 
-Removal of legacy kwargs and properties scheduled for v0.25.0.
+Removal is enforced via `mfgarchon.utils.deprecation.validate_kwargs` with a
+class-level `_REMOVED_KWARGS` migration map (matching the established
+`MFGProblem._validate_kwargs` pattern). Passing any removed kwarg raises
+`ValueError` with a curated "Use 'X' instead" message; reading the legacy
+attribute names raises `AttributeError`. Pre-v0.25.0 this file tested the
+equivalence of the legacy redirects; it has been rewritten to lock in the
+post-removal behaviour and prevent silent reintroduction.
 """
 
 from __future__ import annotations
-
-import warnings
 
 import pytest
 
@@ -45,153 +48,66 @@ def solvers():
     return problem, HJBFDMSolver(problem), FPFDMSolver(problem)
 
 
-class TestLegacyKwargsEquivalent:
-    """Prove every legacy `damping_*` ctor kwarg yields the same instance state as canonical."""
+# The 7 deprecated kwargs removed in v0.25.0 alongside their canonical names.
+LEGACY_KWARGS_REMOVED = [
+    ("damping_factor", "relaxation"),
+    ("damping_factor_M", "relaxation_M"),
+    ("adaptive_damping", "adaptive_relaxation"),
+    ("adaptive_damping_decay", "adaptive_relaxation_decay"),
+    ("adaptive_damping_min", "adaptive_relaxation_min"),
+    ("damping_schedule", "relaxation_schedule"),
+    ("damping_schedule_M", "relaxation_schedule_M"),
+]
 
-    @pytest.mark.parametrize(
-        ("legacy_name", "canonical_name", "value"),
-        [
-            ("damping_factor", "relaxation", 0.7),
-            ("damping_factor_M", "relaxation_M", 0.3),
-            ("adaptive_damping", "adaptive_relaxation", True),
-            ("adaptive_damping_decay", "adaptive_relaxation_decay", 0.8),
-            ("adaptive_damping_min", "adaptive_relaxation_min", 0.01),
-            ("damping_schedule", "relaxation_schedule", "harmonic"),
-            ("damping_schedule_M", "relaxation_schedule_M", "sqrt"),
-        ],
-    )
-    def test_legacy_kwarg_assigns_same_canonical_attribute(self, solvers, legacy_name, canonical_name, value):
-        problem, hjb, fp = solvers
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            legacy_iter = FixedPointIterator(problem, hjb, fp, **{legacy_name: value})
-        canonical_iter = FixedPointIterator(problem, hjb, fp, **{canonical_name: value})
-        assert getattr(legacy_iter, canonical_name) == getattr(canonical_iter, canonical_name)
 
-    def test_all_seven_legacy_kwargs_together(self, solvers):
+class TestDeprecatedKwargsRaiseValueError:
+    """Locked-in v0.25.0 removal: legacy kwargs are rejected via validate_kwargs."""
+
+    @pytest.mark.parametrize(("legacy_name", "canonical_name"), LEGACY_KWARGS_REMOVED)
+    def test_legacy_kwarg_raises_value_error(self, solvers, legacy_name, canonical_name):
+        """Each removed kwarg raises `ValueError` with a curated migration message."""
         problem, hjb, fp = solvers
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            legacy_iter = FixedPointIterator(
-                problem,
-                hjb,
-                fp,
-                damping_factor=0.6,
-                damping_factor_M=0.2,
-                adaptive_damping=True,
-                adaptive_damping_decay=0.8,
-                adaptive_damping_min=0.01,
-                damping_schedule="exponential",
-                damping_schedule_M="harmonic",
-            )
-        canonical_iter = FixedPointIterator(
+        with pytest.raises(ValueError, match=r"Deprecated kwargs detected in FixedPointIterator"):
+            FixedPointIterator(problem, hjb, fp, **{legacy_name: 0.5})
+
+    @pytest.mark.parametrize(("legacy_name", "canonical_name"), LEGACY_KWARGS_REMOVED)
+    def test_legacy_kwarg_error_names_canonical_replacement(self, solvers, legacy_name, canonical_name):
+        """The error message tells the user which canonical name to use."""
+        problem, hjb, fp = solvers
+        with pytest.raises(ValueError, match=rf"'{legacy_name}'.*'{canonical_name}'"):
+            FixedPointIterator(problem, hjb, fp, **{legacy_name: 0.5})
+
+    def test_canonical_kwargs_still_accepted(self, solvers):
+        """The canonical names (which replaced the removed legacy ones) still work."""
+        problem, hjb, fp = solvers
+        iter_obj = FixedPointIterator(
             problem,
             hjb,
             fp,
-            relaxation=0.6,
-            relaxation_M=0.2,
+            relaxation=0.4,
+            relaxation_M=0.3,
             adaptive_relaxation=True,
             adaptive_relaxation_decay=0.8,
             adaptive_relaxation_min=0.01,
-            relaxation_schedule="exponential",
-            relaxation_schedule_M="harmonic",
-        )
-        for attr in [
-            "relaxation",
-            "relaxation_M",
-            "adaptive_relaxation",
-            "adaptive_relaxation_decay",
-            "adaptive_relaxation_min",
-            "relaxation_schedule",
-            "relaxation_schedule_M",
-        ]:
-            assert getattr(legacy_iter, attr) == getattr(canonical_iter, attr)
-
-
-class TestDeprecationWarnings:
-    """Ctor must emit DeprecationWarning once per legacy kwarg passed."""
-
-    @pytest.mark.parametrize(
-        ("legacy_name", "value"),
-        [
-            ("damping_factor", 0.7),
-            ("damping_factor_M", 0.3),
-            ("adaptive_damping", True),
-            ("damping_schedule", "harmonic"),
-        ],
-    )
-    def test_each_legacy_kwarg_warns(self, solvers, legacy_name, value):
-        problem, hjb, fp = solvers
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            FixedPointIterator(problem, hjb, fp, **{legacy_name: value})
-            dep_warnings = [
-                x for x in w if issubclass(x.category, DeprecationWarning) and legacy_name in str(x.message)
-            ]
-        assert len(dep_warnings) >= 1, f"Expected DeprecationWarning for '{legacy_name}'"
-
-    def test_canonical_kwargs_emit_no_warning(self, solvers):
-        problem, hjb, fp = solvers
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            FixedPointIterator(
-                problem,
-                hjb,
-                fp,
-                relaxation=0.7,
-                relaxation_M=0.3,
-                adaptive_relaxation=True,
-                relaxation_schedule="harmonic",
-            )
-            dep_warnings = [
-                x
-                for x in w
-                if issubclass(x.category, DeprecationWarning)
-                and ("damping" in str(x.message) or "relaxation" in str(x.message))
-            ]
-        assert len(dep_warnings) == 0
-
-
-class TestBackwardCompatAttributes:
-    """Legacy `iter.damping_*` attribute access must still work (silent alias via @property)."""
-
-    def test_damping_factor_property_reads_relaxation(self, solvers):
-        problem, hjb, fp = solvers
-        iter_ = FixedPointIterator(problem, hjb, fp, relaxation=0.8)
-        assert iter_.damping_factor == 0.8
-        assert iter_.damping_factor == iter_.relaxation
-
-    def test_all_legacy_properties_return_canonical_values(self, solvers):
-        problem, hjb, fp = solvers
-        iter_ = FixedPointIterator(
-            problem,
-            hjb,
-            fp,
-            relaxation=0.6,
-            relaxation_M=0.2,
-            adaptive_relaxation=True,
-            adaptive_relaxation_decay=0.7,
-            adaptive_relaxation_min=0.05,
             relaxation_schedule="harmonic",
             relaxation_schedule_M="sqrt",
         )
-        assert iter_.damping_factor == 0.6
-        assert iter_.damping_factor_M == 0.2
-        assert iter_.adaptive_damping is True
-        assert iter_.adaptive_damping_decay == 0.7
-        assert iter_.adaptive_damping_min == 0.05
-        assert iter_.damping_schedule == "harmonic"
-        assert iter_.damping_schedule_M == "sqrt"
+        assert iter_obj.relaxation == 0.4
+        assert iter_obj.relaxation_M == 0.3
+        assert iter_obj.adaptive_relaxation is True
+        assert iter_obj.adaptive_relaxation_decay == 0.8
+        assert iter_obj.adaptive_relaxation_min == 0.01
+        assert iter_obj.relaxation_schedule == "harmonic"
+        assert iter_obj.relaxation_schedule_M == "sqrt"
 
-    def test_property_read_emits_no_warning(self, solvers):
-        """Property reads are silent — no DeprecationWarning flooding inside hot loops."""
+
+class TestDeprecatedAttributesRaiseAttributeError:
+    """Locked-in v0.25.0 removal: legacy `iter.damping_*` properties no longer exist."""
+
+    @pytest.mark.parametrize(("legacy_name", "_canonical_name"), LEGACY_KWARGS_REMOVED)
+    def test_legacy_attribute_raises_attribute_error(self, solvers, legacy_name, _canonical_name):
+        """Each removed @property alias raises `AttributeError` on read."""
         problem, hjb, fp = solvers
-        iter_ = FixedPointIterator(problem, hjb, fp, relaxation=0.5)
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            _ = iter_.damping_factor
-            _ = iter_.damping_factor_M
-            _ = iter_.adaptive_damping
-            _ = iter_.damping_schedule
-            dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-        assert len(dep_warnings) == 0
+        iter_obj = FixedPointIterator(problem, hjb, fp, relaxation=0.5)
+        with pytest.raises(AttributeError, match=rf"{legacy_name}"):
+            getattr(iter_obj, legacy_name)

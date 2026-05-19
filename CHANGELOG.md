@@ -122,6 +122,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Stability". Other #1068 hasattr clusters (core/mfg_components, types/protocols)
   deferred — those need Protocol/ABC design.
 
+### Removed (BREAKING)
+
+- **`FixedPointIterator` legacy `damping_*` kwargs and attribute aliases**
+  (Issue #1070, v0.25.0 milestone). The 7 ctor kwargs
+  (`damping_factor`, `damping_factor_M`, `adaptive_damping`,
+  `adaptive_damping_decay`, `adaptive_damping_min`, `damping_schedule`,
+  `damping_schedule_M`) and their 7 read-only `@property` aliases were
+  deprecated in v0.19.2 and are now removed per the 3-version deprecation
+  window. Migration: rename to the canonical `relaxation_*` /
+  `adaptive_relaxation_*` names (one-to-one mapping).
+
+  Enforced at construction by `mfgarchon.utils.deprecation.validate_kwargs`
+  with a class-level `_REMOVED_KWARGS` migration map (matching the
+  `MFGProblem._validate_kwargs` pattern). Passing any removed kwarg raises
+  `ValueError` with a curated "Use 'X' instead (v0.25.0 removal, Issue #1070)"
+  message rather than Python's generic "unexpected keyword argument".
+
+  Unaffected: users on the high-level `PicardConfig(damping_factor=...)`
+  path — `PicardConfig` has its own independent deprecation map at the
+  config layer (`mfgarchon/config/core.py`) which translates to canonical
+  names before passing to `FixedPointIterator`. That config-layer
+  deprecation continues to warn (separate removal track).
+
+  Migration test file: `tests/unit/test_alg/test_fixed_point_iterator_relaxation_alias.py`
+  rewritten from "verify the redirect" to "verify removal" — 22 gate
+  tests lock in the `ValueError` raise + `AttributeError` on attribute
+  read + canonical kwargs still accepted.
+
+  Cluster B of Issue #1070 (`HJBGFDMSolver` deprecated `NiterNewton` /
+  `l2errBoundNewton` / `qp_optimization_level`) deferred to a follow-up
+  PR — that cluster requires migrating ~20 mfg-research scripts that pass
+  `qp_optimization_level=` directly.
+
 ### Fixed
 
 - **`PrecomputedMonotoneStencils` accepts `neighborhoods=` parameter**

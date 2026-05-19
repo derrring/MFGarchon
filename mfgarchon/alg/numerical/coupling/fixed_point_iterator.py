@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
-from mfgarchon.utils.deprecation import deprecated_parameter
+from mfgarchon.utils.deprecation import validate_kwargs
 from mfgarchon.utils.mfg_logging import get_logger
 from mfgarchon.utils.solver_result import SolverResult
 
@@ -66,7 +66,6 @@ class FixedPointIterator(BaseCouplingIterator):
         hjb_solver: HJB solver instance (must be trait-validated)
         fp_solver: FP solver instance (must be trait-validated)
         config: Configuration object (preferred modern approach)
-        damping_factor: Damping parameter (legacy parameter, overridden by config)
         use_anderson: Enable Anderson acceleration
         anderson_depth: Anderson acceleration memory depth
         anderson_beta: Anderson acceleration mixing parameter
@@ -82,20 +81,43 @@ class FixedPointIterator(BaseCouplingIterator):
             - Callable: State-dependent drift α(t, x, m) -> ndarray
     """
 
-    @deprecated_parameter(param_name="damping_factor", since="v0.19.2", replacement="relaxation")
-    @deprecated_parameter(param_name="damping_factor_M", since="v0.19.2", replacement="relaxation_M")
-    @deprecated_parameter(param_name="adaptive_damping", since="v0.19.2", replacement="adaptive_relaxation")
-    @deprecated_parameter(param_name="adaptive_damping_decay", since="v0.19.2", replacement="adaptive_relaxation_decay")
-    @deprecated_parameter(param_name="adaptive_damping_min", since="v0.19.2", replacement="adaptive_relaxation_min")
-    @deprecated_parameter(param_name="damping_schedule", since="v0.19.2", replacement="relaxation_schedule")
-    @deprecated_parameter(param_name="damping_schedule_M", since="v0.19.2", replacement="relaxation_schedule_M")
+    # v0.25.0 removal: 7 legacy `damping_*` kwargs removed per the 3-version
+    # deprecation window (Issue #1070). Caught upfront in `__init__` via
+    # `validate_kwargs` with a curated migration message instead of Python's
+    # generic "unexpected keyword argument" — matches the mfgarchon
+    # convention used by MFGProblem._validate_kwargs.
+    _REMOVED_KWARGS: ClassVar[dict[str, str]] = {
+        "damping_factor": "Use 'relaxation' instead (v0.25.0 removal, Issue #1070).",
+        "damping_factor_M": "Use 'relaxation_M' instead (v0.25.0 removal, Issue #1070).",
+        "adaptive_damping": "Use 'adaptive_relaxation' instead (v0.25.0 removal, Issue #1070).",
+        "adaptive_damping_decay": "Use 'adaptive_relaxation_decay' instead (v0.25.0 removal, Issue #1070).",
+        "adaptive_damping_min": "Use 'adaptive_relaxation_min' instead (v0.25.0 removal, Issue #1070).",
+        "damping_schedule": "Use 'relaxation_schedule' instead (v0.25.0 removal, Issue #1070).",
+        "damping_schedule_M": "Use 'relaxation_schedule_M' instead (v0.25.0 removal, Issue #1070).",
+    }
+    _RECOGNIZED_KWARGS: ClassVar[set[str]] = {
+        "config",
+        "relaxation",
+        "relaxation_M",
+        "use_anderson",
+        "anderson_depth",
+        "anderson_beta",
+        "backend",
+        "volatility_field",
+        "drift_field",
+        "adaptive_relaxation",
+        "adaptive_relaxation_decay",
+        "adaptive_relaxation_min",
+        "relaxation_schedule",
+        "relaxation_schedule_M",
+    }
+
     def __init__(
         self,
         problem: MFGProblem,
         hjb_solver: BaseHJBSolver,
         fp_solver: BaseFPSolver,
         config: MFGSolverConfig | None = None,
-        # Canonical relaxation parameters (v0.19.2+)
         relaxation: float = 0.5,
         relaxation_M: float | None = None,
         use_anderson: bool = False,
@@ -109,14 +131,7 @@ class FixedPointIterator(BaseCouplingIterator):
         adaptive_relaxation_min: float = 0.05,
         relaxation_schedule: str = "constant",
         relaxation_schedule_M: str | None = None,
-        # Legacy damping_* kwargs (deprecated since v0.19.2, removal v0.25.0)
-        damping_factor: float | None = None,
-        damping_factor_M: float | None = None,
-        adaptive_damping: bool | None = None,
-        adaptive_damping_decay: float | None = None,
-        adaptive_damping_min: float | None = None,
-        damping_schedule: str | None = None,
-        damping_schedule_M: str | None = None,
+        **kwargs: Any,
     ):
         """
         Args:
@@ -125,25 +140,18 @@ class FixedPointIterator(BaseCouplingIterator):
                 for both. Issue #719: Per-variable relaxation support.
                 Recommended for MFG: relaxation=1.0, relaxation_M=0.2 (U adapts fully,
                 M filters particle noise).
-
-            Legacy `damping_*` kwargs are still accepted with DeprecationWarning.
         """
-        # Redirect legacy kwargs -> canonical (decorator already warned)
-        if damping_factor is not None:
-            relaxation = damping_factor
-        if damping_factor_M is not None:
-            relaxation_M = damping_factor_M
-        if adaptive_damping is not None:
-            adaptive_relaxation = adaptive_damping
-        if adaptive_damping_decay is not None:
-            adaptive_relaxation_decay = adaptive_damping_decay
-        if adaptive_damping_min is not None:
-            adaptive_relaxation_min = adaptive_damping_min
-        if damping_schedule is not None:
-            relaxation_schedule = damping_schedule
-        if damping_schedule_M is not None:
-            relaxation_schedule_M = damping_schedule_M
-
+        # Reject removed kwargs with a curated migration message; warn on
+        # unrecognized kwargs that may be typos. See _REMOVED_KWARGS above.
+        if kwargs:
+            validate_kwargs(
+                kwargs=kwargs,
+                deprecated_kwargs=self._REMOVED_KWARGS,
+                recognized_kwargs=self._RECOGNIZED_KWARGS,
+                context="FixedPointIterator",
+                error_on_deprecated=True,
+                warn_on_unrecognized=True,
+            )
         super().__init__(problem)
         self.backend = backend
         self.hjb_solver = hjb_solver
@@ -222,48 +230,6 @@ class FixedPointIterator(BaseCouplingIterator):
 
         # Cache solver signatures via base class (Issue #934)
         self._init_solver_signatures(self.hjb_solver, self.fp_solver)
-
-    # ------------------------------------------------------------------
-    # Backward-compat attribute aliases (damping_* -> relaxation_*)
-    # Added in v0.19.2. Silent (no DeprecationWarning on read) to avoid
-    # log flooding inside Picard iteration hot loops. Removal in v0.25.0;
-    # the ctor kwargs already emit DeprecationWarning via @deprecated_parameter.
-    # ------------------------------------------------------------------
-
-    @property
-    def damping_factor(self) -> float:
-        """Deprecated alias for `relaxation` (v0.19.2+). Removal in v0.25.0."""
-        return self.relaxation
-
-    @property
-    def damping_factor_M(self) -> float | None:
-        """Deprecated alias for `relaxation_M` (v0.19.2+). Removal in v0.25.0."""
-        return self.relaxation_M
-
-    @property
-    def adaptive_damping(self) -> bool:
-        """Deprecated alias for `adaptive_relaxation` (v0.19.2+). Removal in v0.25.0."""
-        return self.adaptive_relaxation
-
-    @property
-    def adaptive_damping_decay(self) -> float:
-        """Deprecated alias for `adaptive_relaxation_decay` (v0.19.2+). Removal in v0.25.0."""
-        return self.adaptive_relaxation_decay
-
-    @property
-    def adaptive_damping_min(self) -> float:
-        """Deprecated alias for `adaptive_relaxation_min` (v0.19.2+). Removal in v0.25.0."""
-        return self.adaptive_relaxation_min
-
-    @property
-    def damping_schedule(self) -> str:
-        """Deprecated alias for `relaxation_schedule` (v0.19.2+). Removal in v0.25.0."""
-        return self.relaxation_schedule
-
-    @property
-    def damping_schedule_M(self) -> str | None:
-        """Deprecated alias for `relaxation_schedule_M` (v0.19.2+). Removal in v0.25.0."""
-        return self.relaxation_schedule_M
 
     def _compose_hjb_source(self, m_current: np.ndarray) -> Callable | None:
         """Compose problem-level source terms into a solver-level source_term callable.
