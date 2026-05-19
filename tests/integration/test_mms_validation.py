@@ -876,7 +876,7 @@ class TestCoupledHJBFPValidation:
             problem,
             hjb_solver=hjb_solver,
             fp_solver=fp_solver,
-            damping_factor=0.5,
+            relaxation=0.5,
         )
 
         result = mfg_solver.solve(max_iterations=5, tolerance=1e-3, verbose=False)
@@ -923,7 +923,7 @@ class TestCoupledHJBFPValidation:
             problem,
             hjb_solver=hjb_solver,
             fp_solver=fp_solver,
-            damping_factor=0.5,
+            relaxation=0.5,
         )
 
         result = mfg_solver.solve(max_iterations=5, tolerance=1e-3, verbose=False)

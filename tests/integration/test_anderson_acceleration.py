@@ -71,7 +71,7 @@ def run_solver(use_anderson: bool = False, backend: str | None = None):
         problem,
         hjb_solver=hjb_solver,
         fp_solver=fp_solver,
-        damping_factor=0.5,
+        relaxation=0.5,
         backend=backend,
         use_anderson=use_anderson,
         anderson_depth=5,

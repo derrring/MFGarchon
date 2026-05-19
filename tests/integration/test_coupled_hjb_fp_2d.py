@@ -116,7 +116,7 @@ def _create_2d_mfg_solver(problem, damping=0.3):
         problem,
         hjb_solver=hjb,
         fp_solver=fp,
-        damping_factor=damping,
+        relaxation=damping,
     )
 
 

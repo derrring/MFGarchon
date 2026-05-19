@@ -123,7 +123,7 @@ def solve_with_stochastic_monitoring(seed=42, max_iterations=100, tolerance=1e-4
         problem,
         hjb_solver=hjb_solver,
         fp_solver=fp_solver,
-        damping_factor=0.5,
+        relaxation=0.5,
     )
 
     # Custom iteration loop with stochastic monitoring

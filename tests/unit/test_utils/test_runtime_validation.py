@@ -179,7 +179,7 @@ def test_fixed_point_nan_early_termination():
         problem=problem,
         hjb_solver=hjb_solver,
         fp_solver=fp_solver,
-        damping_factor=0.5,
+        relaxation=0.5,
     )
     result = iterator.solve(max_iterations=10, tolerance=1e-6)
 

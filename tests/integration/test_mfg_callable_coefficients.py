@@ -68,7 +68,7 @@ class TestMFGCallableCoefficients:
             problem,
             hjb_solver=hjb_solver,
             fp_solver=fp_solver,
-            damping_factor=0.5,
+            relaxation=0.5,
             volatility_field=porous_medium_diffusion,
         )
 
@@ -106,7 +106,7 @@ class TestMFGCallableCoefficients:
             problem,
             hjb_solver=hjb_solver,
             fp_solver=fp_solver,
-            damping_factor=0.5,
+            relaxation=0.5,
             volatility_field=crowd_diffusion,
         )
 
@@ -140,7 +140,7 @@ class TestMFGCallableCoefficients:
             problem,
             hjb_solver=hjb_solver_callable,
             fp_solver=fp_solver_callable,
-            damping_factor=0.5,
+            relaxation=0.5,
             volatility_field=constant_diffusion,
         )
         result_callable = mfg_solver_callable.solve(max_iterations=5, tolerance=1e-3, verbose=False)
@@ -152,7 +152,7 @@ class TestMFGCallableCoefficients:
             problem,
             hjb_solver=hjb_solver_constant,
             fp_solver=fp_solver_constant,
-            damping_factor=0.5,
+            relaxation=0.5,
             volatility_field=None,  # Use problem.sigma
         )
         result_constant = mfg_solver_constant.solve(max_iterations=5, tolerance=1e-3, verbose=False)
@@ -193,7 +193,7 @@ class TestMFGCallableCoefficients:
             problem,
             hjb_solver=hjb_solver,
             fp_solver=fp_solver,
-            damping_factor=0.5,
+            relaxation=0.5,
             volatility_field=volatility_field,
         )
 
@@ -227,7 +227,7 @@ class TestMFGCallableCoefficients:
             problem,
             hjb_solver=hjb_solver,
             fp_solver=fp_solver,
-            damping_factor=0.5,
+            relaxation=0.5,
             volatility_field=state_diffusion,
         )
 

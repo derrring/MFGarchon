@@ -114,7 +114,7 @@ class TestNetworkMFGSolverCreation:
             damping_factor=0.7,
         )
 
-        assert solver.damping_factor == 0.7
+        assert solver.relaxation == 0.7
 
 
 class TestNetworkMFGProblemSetup:

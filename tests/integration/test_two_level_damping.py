@@ -72,7 +72,7 @@ def run_solver(name: str, use_anderson: bool, damping_factor: float, anderson_be
         problem,
         hjb_solver=hjb_solver,
         fp_solver=fp_solver,
-        damping_factor=damping_factor,
+        relaxation=damping_factor,
         use_anderson=use_anderson,
         anderson_depth=5,
         anderson_beta=anderson_beta or 1.0,

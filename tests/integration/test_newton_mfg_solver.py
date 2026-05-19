@@ -233,7 +233,7 @@ class TestNewtonVsPicard:
             comparison_problem,
             hjb_solver=hjb_picard,
             fp_solver=fp_picard,
-            damping_factor=0.5,
+            relaxation=0.5,
         )
 
         # Solve

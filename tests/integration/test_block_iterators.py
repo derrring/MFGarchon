@@ -281,7 +281,7 @@ class TestBlockVsFixedPoint:
         fp_fp = FPFDMSolver(comparison_problem)
 
         gs_solver = BlockGaussSeidelIterator(comparison_problem, hjb_gs, fp_gs, damping_factor=0.5)
-        fp_solver = FixedPointIterator(comparison_problem, hjb_solver=hjb_fp, fp_solver=fp_fp, damping_factor=0.5)
+        fp_solver = FixedPointIterator(comparison_problem, hjb_solver=hjb_fp, fp_solver=fp_fp, relaxation=0.5)
 
         result_gs = gs_solver.solve(max_iterations=15, tolerance=1e-5, verbose=False)
         result_fp = fp_solver.solve(max_iterations=15, tolerance=1e-5, verbose=False)
