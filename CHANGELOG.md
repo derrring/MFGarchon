@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`HJBHowardSolver`** — Howard's policy iteration inner solver for HJB on
+  GFDM clouds (Issue #1118). Replaces the Newton inner loop of
+  `HJBGFDMSolver._solve_timestep` when the Hamiltonian is strictly convex
+  in `p`. Resolves the temporal-plateau symptom where Armijo backtracking
+  bottoms out at `MIN_ALPHA = 1e-6` and Newton makes no net progress past
+  the first few backward steps.
+
+  Graduates the 5-fork research-side `howard_patch_*` family
+  (`mfg-research/experiments/gfdm_monotonicity_audit/minors/{exp08, exp09,
+  exp11}/`) into a single peer class to `HJBGFDMSolver`. Composition-based:
+  takes a constructed `HJBGFDMSolver` with `monotonicity_scheme="joint_socp"`
+  + `monotonicity_application="precompute"` as `stencil_provider`, plus a
+  `alpha_star(x, p, m, t) -> alpha` Legendre callable. Three discretisation
+  options: `upwind_projection` (default, projection onto α direction),
+  `upwind_per_axis` (per-axis sign-aware Dpos/Dneg pair), `central` (bare
+  central, accurate on smooth problems; not monotone for advection-dominant).
+
+  Convergence hypothesis: H strictly convex in p (Bokanowski-Maroso-Zidani
+  2009). Separability is neither necessary nor sufficient.
+
+  Reported ~57× speedup over Newton inner on irregular 2D clouds with
+  11-15% k-NN-fallback stencils (per exp09 Phase 7 readme). Eight unit
+  tests cover construction validation, 1D LQ Riccati closed-form
+  (`P(0)/P(T) = 0.5` per mfgarchon HJB convention — see
+  `mfg-research/docs/archon-notes/development/guides/NAMING_CONVENTIONS.md`
+  § HJB Equation Conventions), Newton-stall reproducer, each discretisation
+  option, and 2D integration with running-cost callable. Howard is a peer
+  to `HJBGFDMSolver`; the outer `FixedPointIterator` (Picard / fictitious
+  play) is unchanged — Howard replaces inner Newton only.
+
 - **`preserve_indices=False` flag on `FPParticleSolver`** (Issue #1119).
   When `True`, absorbed particles are NaN-marked in the per-step trajectory
   rather than compact-removed, so `particle_history[t].shape == (num_particles, d)`
