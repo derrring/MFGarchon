@@ -752,9 +752,11 @@ class MonotonicityEnforcer:
             A = taylor_data["A"]
             W = taylor_data["W"]
             try:
-                # Compute (A^T W A)^{-1} A^T W and extract row
-                AtWA_inv = np.linalg.inv(A.T @ W @ A)
-                weights_matrix = AtWA_inv @ A.T @ W
+                # Issue #1066: solve(AtWA, AtW) directly instead of inv(AtWA) @ AtW.
+                # Squares condition number; on marginal stencils the inv path can
+                # silently produce weights that violate M-matrix off-diag positivity.
+                AtW = A.T @ W
+                weights_matrix = np.linalg.solve(A.T @ W @ A, AtW)
                 weights = weights_matrix[derivative_idx, :]
                 return weights
             except np.linalg.LinAlgError:
