@@ -725,6 +725,12 @@ class HJBGFDMSolver(BaseHJBSolver):
                     k_neighbors=k_neighbors,
                     neighborhood_mode=neighborhood_mode,
                     geometry=collocation_geometry,  # Issue #711: periodic support
+                    # Issue #1124: visibility filter at operator level so
+                    # D_lap / D_grad respect obstacle connectivity (not just
+                    # NeighborhoodBuilder's post-filter view).
+                    obstacle_sdf=obstacle_sdf,
+                    visibility_samples=visibility_samples,
+                    visibility_margin=visibility_margin,
                 )
             elif derivative_method == "rbf":
                 self._gfdm_operator = create_operator(

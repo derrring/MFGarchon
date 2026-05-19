@@ -317,6 +317,9 @@ class TaylorOperator(DifferentialOperator):
         neighborhood_mode: str = "hybrid",
         geometry: object | None = None,
         adaptive_params: tuple[np.ndarray, np.ndarray] | None = None,
+        obstacle_sdf: object | None = None,
+        visibility_samples: int = 10,
+        visibility_margin: float = 0.0,
     ):
         """
         Initialize Taylor operator with precomputed structure.
@@ -344,6 +347,20 @@ class TaylorOperator(DifferentialOperator):
                 per-point adaptive neighborhoods where each point has its own
                 (k, delta) values. This provides better boundary/corner handling.
                 Sets neighborhood_mode="adaptive" automatically.
+            obstacle_sdf: Optional callable ``f(x) -> NDArray`` giving the signed
+                distance to the obstacle region (Issue #1124). Convention:
+                ``obstacle_sdf(x) < 0`` means x is INSIDE obstacle. When provided,
+                neighbors whose line of sight to the center crosses an obstacle
+                are excluded from the stencil. This makes ``D_lap`` / ``D_grad``
+                respect domain connectivity in thin-wall geometries where
+                ``delta`` exceeds wall thickness. Same convention as
+                ``NeighborhoodBuilder.obstacle_sdf`` — pass the SDF of the
+                obstacle region (e.g., ``UnionDomain(...).signed_distance``),
+                not the navigable domain.
+            visibility_samples: Number of interior samples per stencil edge for
+                visibility check. Default 10 (sufficient for convex obstacles).
+            visibility_margin: Safety margin for visibility filter; edges with
+                any sample at ``obstacle_sdf < margin`` are blocked. Default 0.0.
         """
         self._points = np.asarray(points)
         self._n_points, self._dimension = self._points.shape
@@ -351,6 +368,9 @@ class TaylorOperator(DifferentialOperator):
         self.weight_function = weight_function
         self.weight_scale = weight_scale
         self._geometry = geometry
+        self._obstacle_sdf = obstacle_sdf
+        self._visibility_samples = int(visibility_samples)
+        self._visibility_margin = float(visibility_margin)
 
         # Handle adaptive parameters mode
         if adaptive_params is not None:
@@ -486,6 +506,8 @@ class TaylorOperator(DifferentialOperator):
 
         self.neighborhoods: list[dict] = []
         self._hybrid_expanded_count = 0
+        self._visibility_filtered_count = 0
+        self._visibility_filtered_min_kept = self._n_points  # tracks worst-case stencil size
 
         for i in range(self._n_points):
             # Get per-point k and delta for adaptive mode
@@ -544,6 +566,30 @@ class TaylorOperator(DifferentialOperator):
             # Get neighbor points from augmented cloud (preserves ghost positions for delta_x)
             neighbor_points = augmented_points[aug_neighbor_indices]
 
+            # Issue #1124: visibility filter at operator level. Without this,
+            # ``get_derivative_weights(i)`` returns weights on a stencil whose
+            # edges may cross obstacles, and the assembled ``D_lap`` / ``D_grad``
+            # couple values through walls. The NeighborhoodBuilder layered on
+            # top re-applies this filter, but the pre-assembled operator-side
+            # sparse matrices come straight from these stencils.
+            if self._obstacle_sdf is not None and len(neighbor_indices) > 0:
+                from mfgarchon.geometry.visibility import filter_visible_neighbors
+
+                visible_mask = filter_visible_neighbors(
+                    center=self._points[i],
+                    candidates=neighbor_points,
+                    obstacle_sdf=self._obstacle_sdf,
+                    n_samples=self._visibility_samples,
+                    margin=self._visibility_margin,
+                )
+                n_blocked = int((~visible_mask).sum())
+                if n_blocked > 0:
+                    neighbor_indices = neighbor_indices[visible_mask]
+                    neighbor_points = neighbor_points[visible_mask]
+                    distances = distances[visible_mask]
+                    self._visibility_filtered_count += n_blocked
+                    self._visibility_filtered_min_kept = min(self._visibility_filtered_min_kept, len(neighbor_indices))
+
             self.neighborhoods.append(
                 {
                     "indices": neighbor_indices,  # Original indices (for value lookup)
@@ -576,6 +622,21 @@ class TaylorOperator(DifferentialOperator):
                 UserWarning,
                 stacklevel=2,
             )
+
+        if self._obstacle_sdf is not None and self._visibility_filtered_count > 0:
+            import warnings
+
+            min_kept = self._visibility_filtered_min_kept
+            if min_kept < self.n_derivatives:
+                warnings.warn(
+                    f"Operator-level visibility filter (Issue #1124) reduced at "
+                    f"least one stencil to {min_kept} neighbors, below the "
+                    f"Taylor LSQ minimum {self.n_derivatives}. Taylor matrix "
+                    f"construction will fall back to None at those points. "
+                    f"Consider increasing delta or relaxing visibility_margin.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
     def _build_taylor_matrices(self):
         """Precompute Taylor expansion matrices for all points."""

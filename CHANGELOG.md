@@ -99,6 +99,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`TaylorOperator` now accepts `obstacle_sdf=` / `visibility_samples=` /
+  `visibility_margin=`** (Issue #1124). When provided, stencil edges
+  crossing the obstacle region are excluded at operator-construction
+  time, so the pre-assembled `D_lap` / `D_grad` sparse matrices respect
+  domain connectivity. Same convention as `NeighborhoodBuilder.obstacle_sdf`:
+  `obstacle_sdf(x) < 0` means inside the obstacle region (pass the SDF
+  of the obstacle, not the navigable domain). Wired through
+  `HJBGFDMSolver.__init__` so `HJBGFDMSolver(obstacle_sdf=...)` now
+  filters both layers (operator-level `D_lap` / `D_grad` AND the
+  post-adaptive `NeighborhoodBuilder.neighborhoods` view).
+
+  Pre-this-fix, `obstacle_sdf=` reached only `NeighborhoodBuilder`. The
+  bulk linear operator was constructed without it, so wall-crossing
+  edges remained in `D_lap` / `D_grad` regardless of the documented
+  visibility-filter behavior. Symptom in 2D thin-wall geometries
+  (`delta` exceeds wall thickness): HJB-backward-integrated `U(t=0)`
+  inverts in dead corners versus door bands even with correct geodesic
+  terminal cost (see issue body §Reproducer).
+
+  Counter `op._visibility_filtered_count` records how many stencil
+  edges were blocked; constructor emits a `UserWarning` when filtering
+  starves any stencil below `n_derivatives` (Taylor LSQ falls through
+  to `None` at those points — consider increasing `delta` or relaxing
+  `visibility_margin`).
+
 - **CFL diagnostic logging now emits at INFO once per solver instance**, then
   DEBUG on subsequent calls (Issue #1052). Previously every Picard iteration
   emitted the same "CFL diagnostic" line at INFO, spamming user logs and
