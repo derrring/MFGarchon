@@ -1743,11 +1743,12 @@ class HJBGFDMSolver(BaseHJBSolver):
                 else:
                     derivative_coeffs = np.zeros(len(b))
 
-        elif taylor_data.get("AtWA_inv") is not None:  # type: ignore[attr-defined]
-            # Use precomputed normal equations
-            derivative_coeffs = taylor_data["AtWA_inv"] @ taylor_data["AtW"] @ b
         else:
-            # Final fallback to direct least squares
+            # Final fallback to direct least squares on A. Reached when
+            # SVD and QR both failed in NeighborhoodBuilder (#1125 removed
+            # the legacy `AtWA_inv` normal-equations branch — see issue
+            # for why pseudo-inverse via lstsq is strictly better than
+            # inv() on the squared-condition normal-equations matrix).
             A_matrix = taylor_data.get("A")  # type: ignore[attr-defined]
             if A_matrix is not None:
                 lstsq_result = lstsq(A_matrix, b)
@@ -1782,8 +1783,8 @@ class HJBGFDMSolver(BaseHJBSolver):
         # SOCP / M-matrix-QP weights at __init__).
         #
         # Without this override, the slow path above computes derivatives via
-        # bare Wendland-Taylor LSQ (`taylor_data["AtWA_inv"]` etc.), while the
-        # Jacobian uses SOCP-corrected weights. Newton then solves
+        # bare Wendland-Taylor LSQ (`taylor_data["U"]/["S"]/["Vt"]` etc.),
+        # while the Jacobian uses SOCP-corrected weights. Newton then solves
         #     J · δu = -r
         # with J and r assembled from inconsistent stencil weights, converging
         # to a stationary point of the mongrel system rather than the true

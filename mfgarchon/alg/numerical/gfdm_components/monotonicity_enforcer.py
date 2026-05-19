@@ -341,8 +341,6 @@ class MonotonicityEnforcer:
             UT_Wb = U.T @ Wb
             S_inv_UT_Wb = UT_Wb / S
             return Vt.T @ S_inv_UT_Wb
-        elif taylor_data.get("AtWA_inv") is not None:
-            return taylor_data["AtWA_inv"] @ taylor_data["AtW"] @ b
         else:
             A = taylor_data["A"]
             from scipy.linalg import lstsq
@@ -762,20 +760,29 @@ class MonotonicityEnforcer:
             except np.linalg.LinAlgError:
                 return None
 
-        elif taylor_data.get("AtWA_inv") is not None:
-            # Direct normal equations
-            AtWA_inv = taylor_data["AtWA_inv"]
-            W = taylor_data["W"]
-            A = taylor_data["A"]
-            weights_matrix = AtWA_inv @ A.T @ W
-            weights = weights_matrix[derivative_idx, :]
-            return weights
-
         else:
-            raise ValueError(
-                "taylor_data must contain one of: 'use_svd', 'use_qr', or 'AtWA_inv'. "
-                f"Got keys: {list(taylor_data.keys())}"
-            )
+            # SVD and QR both failed in NeighborhoodBuilder; #1125 removed
+            # the legacy AtWA_inv normal-equations branch. Fall through to
+            # SVD-based pseudo-inverse on `sqrt(W) @ A` directly via
+            # numpy.linalg.pinv. Condition number κ(A), not κ(A)².
+            A = taylor_data.get("A")
+            W = taylor_data.get("W")
+            if A is None or W is None:
+                raise ValueError(
+                    "taylor_data must contain one of: 'use_svd', 'use_qr', "
+                    "or both 'A' and 'W' for the lstsq fallback path. "
+                    f"Got keys: {list(taylor_data.keys())}"
+                )
+            # W is a 1-D weight array of length n_neighbors (see
+            # NeighborhoodBuilder.compute_weights). Weighted LSQ:
+            # coeffs = pinv(sqrt(W) @ A) @ (sqrt(W) @ b), so
+            # weights_matrix = pinv(sqrt(W) @ A) @ diag(sqrt(W)),
+            # shape (n_derivs, n_neighbors).
+            sqrt_w = np.sqrt(np.maximum(np.asarray(W).reshape(-1), 0.0))
+            weighted_A = sqrt_w[:, None] * A
+            pinv_wA = np.linalg.pinv(weighted_A)
+            weights_matrix = pinv_wA * sqrt_w[None, :]
+            return weights_matrix[derivative_idx, :]
 
     def print_diagnostics(self, hjb_method_name: str = "HJB-GFDM", qp_cache: Any = None) -> None:
         """

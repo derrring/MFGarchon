@@ -728,23 +728,23 @@ class NeighborhoodBuilder:
                         "use_svd": False,
                     }
                 except np.linalg.LinAlgError:
-                    # Final fallback to normal equations if QR also fails
+                    # SVD and QR both failed on sqrt(W) @ A. Storing
+                    # `np.linalg.inv(A.T @ W @ A)` here (the legacy path)
+                    # is strictly worse than the failed SVD: forming AᵀWA
+                    # squares the condition number, and inv() on a matrix
+                    # that already defeated two more-stable factorisations
+                    # is the silent-fallback anti-pattern CLAUDE.md
+                    # prohibits. Store {A, W} only; consumers fall through
+                    # to scipy.linalg.lstsq, which uses SVD-based
+                    # pseudo-inverse on A directly (condition number κ(A),
+                    # not κ(A)²). See Issue #1125 for the full design
+                    # rationale.
                     self.taylor_matrices[i] = {
                         "A": A,
                         "W": W,
-                        "AtW": A.T @ W,
-                        "AtWA_inv": None,
                         "use_qr": False,
                         "use_svd": False,
                     }
-
-                    try:
-                        AtWA = A.T @ W @ A
-                        if np.linalg.det(AtWA) > 1e-12:
-                            self.taylor_matrices[i]["AtWA_inv"] = np.linalg.inv(AtWA)
-                    except (np.linalg.LinAlgError, FloatingPointError):
-                        # Cannot compute inverse - leave AtWA_inv as None
-                        pass
 
     def compute_weights(self, distances: np.ndarray) -> np.ndarray:
         """
