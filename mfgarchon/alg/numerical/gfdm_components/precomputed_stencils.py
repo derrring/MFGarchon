@@ -132,8 +132,7 @@ class PrecomputedMonotoneStencils:
         self._dimension = self._points.shape[1] if self._points.ndim == 2 else 1
         if self._dimension not in (1, 2):
             raise ValueError(
-                f"PrecomputedMonotoneStencils currently supports 1D or 2D, "
-                f"got dimension {self._dimension}"
+                f"PrecomputedMonotoneStencils currently supports 1D or 2D, got dimension {self._dimension}"
             )
 
         self.stencils: dict[int, MonotoneStencilData] = {}
