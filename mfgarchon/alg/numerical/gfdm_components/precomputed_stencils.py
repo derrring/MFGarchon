@@ -33,7 +33,6 @@ from __future__ import annotations
 import time
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -42,9 +41,6 @@ from mfgarchon.alg.numerical.gfdm_components.joint_socp import (
     build_taylor_matrix_2d,
     wendland_stencil_weights,
 )
-
-if TYPE_CHECKING:
-    from mfgarchon.alg.numerical.gfdm_components.gfdm_strategies import TaylorOperator
 
 # Optional: OSQP for fast QP solving
 try:
@@ -84,27 +80,21 @@ class PrecomputedMonotoneStencils:
 
     Parameters
     ----------
-    operator : TaylorOperator
-        GFDM operator with precomputed Taylor matrices. Used when ``neighborhoods``
-        is None (legacy path); read for pre-adaptive ``op.get_derivative_weights(i)``.
     is_boundary : np.ndarray
         Boolean array indicating boundary points
+    neighborhoods : dict
+        Post-filter stencil dict (typically ``HJBGFDMSolver.neighborhoods`` built
+        by ``NeighborhoodBuilder``). Stencils are built on
+        ``neighborhoods[i]["indices"]``. Required for correctness on irregular
+        clouds where ``adaptive_neighborhoods=True`` enlarges boundary stencils
+        (Issue #1102 dual-source bug class — legacy fallback removed in v0.25.0).
+    points : np.ndarray
+        Collocation points, shape (n_total, dimension).
+    delta : float
+        Wendland kernel support radius. Sets the LSQ weighting used to compute
+        unconstrained Laplacian weights on the supplied stencil.
     tolerance : float
         Numerical tolerance for M-matrix check (default: 1e-6)
-    neighborhoods : dict | None
-        Post-filter stencil dict (typically ``HJBGFDMSolver.neighborhoods`` built
-        by ``NeighborhoodBuilder``). When provided, stencils are built on
-        post-adaptive ``neighborhoods[i]["indices"]`` rather than the pre-adaptive
-        ``op.get_derivative_weights(i)``. Requires ``points`` and ``delta``.
-        Issue #1102: required for correctness on irregular clouds where
-        ``adaptive_neighborhoods=True`` enlarges boundary stencils.
-    points : np.ndarray | None
-        Collocation points, shape (n_total, dimension). Required when
-        ``neighborhoods`` is provided.
-    delta : float | None
-        Wendland kernel support radius. Required when ``neighborhoods`` is
-        provided. Sets the LSQ weighting used to recompute unconstrained
-        Laplacian weights on the enlarged stencil.
 
     Attributes
     ----------
@@ -115,48 +105,36 @@ class PrecomputedMonotoneStencils:
 
     Example
     -------
-    >>> stencils = PrecomputedMonotoneStencils(operator, is_boundary)
-    >>> print(f"Precomputed {stencils.stats['n_monotonized']} stencils in {stencils.stats['time_ms']:.1f}ms")
+    >>> stencils = PrecomputedMonotoneStencils(is_boundary, neighborhoods, points, delta)
     >>> lap_weights, neighbors = stencils.get_laplacian_weights(boundary_point_idx)
     """
 
     def __init__(
         self,
-        operator: TaylorOperator,
         is_boundary: np.ndarray,
+        neighborhoods: dict,
+        points: np.ndarray,
+        delta: float,
         tolerance: float = 1e-6,
-        neighborhoods: dict | None = None,
-        points: np.ndarray | None = None,
-        delta: float | None = None,
     ):
-        self._operator = operator
+        # Single source of truth: stencils are always computed against the
+        # explicitly-supplied post-filter neighborhoods (after visibility
+        # filter, ghost nodes, adaptive δ-enlargement). The legacy fallback
+        # to `op.get_derivative_weights()` (pre-adaptive op.neighborhoods)
+        # was removed in v0.25.0 — it silently produced wrong results when
+        # adaptive_neighborhoods modified the runtime stencils (Issue #1102
+        # dual-source bug class).
         self._is_boundary = np.asarray(is_boundary)
         self._tolerance = tolerance
-        # Post-filter neighborhoods (after visibility filter, ghost nodes,
-        # adaptive δ-enlargement). Issue #1102: when None, fall back to
-        # pre-adaptive op.get_derivative_weights() (legacy path that crashes
-        # if adaptive enlargement modified self.neighborhoods).
         self._neighborhoods = neighborhoods
-        if neighborhoods is not None:
-            if points is None or delta is None:
-                raise ValueError(
-                    "PrecomputedMonotoneStencils: when neighborhoods= is provided, "
-                    "points= and delta= are also required (used to recompute "
-                    "unconstrained Wendland-LSQ Laplacian weights on the enlarged "
-                    "stencil)."
-                )
-            self._points = np.asarray(points)
-            self._delta = float(delta)
-            self._dimension = self._points.shape[1] if self._points.ndim == 2 else 1
-            if self._dimension not in (1, 2):
-                raise ValueError(
-                    f"PrecomputedMonotoneStencils with neighborhoods= currently "
-                    f"supports 1D or 2D, got dimension {self._dimension}"
-                )
-        else:
-            self._points = None
-            self._delta = None
-            self._dimension = None
+        self._points = np.asarray(points)
+        self._delta = float(delta)
+        self._dimension = self._points.shape[1] if self._points.ndim == 2 else 1
+        if self._dimension not in (1, 2):
+            raise ValueError(
+                f"PrecomputedMonotoneStencils currently supports 1D or 2D, "
+                f"got dimension {self._dimension}"
+            )
 
         self.stencils: dict[int, MonotoneStencilData] = {}
         self.stats = {
@@ -180,24 +158,7 @@ class PrecomputedMonotoneStencils:
 
         for i in boundary_indices:
             i = int(i)
-            if self._neighborhoods is not None:
-                # Post-adaptive path (Issue #1102): use runtime stencil indices
-                # so L_w aligns with `b = u_neighbors - u_center` built from
-                # the same neighborhoods at the override site in
-                # HJBGFDMSolver.approximate_derivatives.
-                stencil = self._compute_unconstrained_from_neighborhoods(i)
-            else:
-                # Legacy path: pre-adaptive op weights. Crashes at the override
-                # site if adaptive_neighborhoods modified self.neighborhoods
-                # (see Issue #1102 for the dual-source bug class).
-                weights_data = self._operator.get_derivative_weights(i)
-                if weights_data is None:
-                    continue
-                stencil = (
-                    weights_data["lap_weights"].copy(),
-                    weights_data["neighbor_indices"].copy(),
-                )
-
+            stencil = self._compute_unconstrained_from_neighborhoods(i)
             if stencil is None:
                 continue
             lap_weights, neighbor_indices = stencil

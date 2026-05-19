@@ -8,19 +8,22 @@ enlarged the runtime neighborhood (e.g. 53 → 522 at corner buffer points
 on a 1200-point Stage C cloud), the two stencils diverged and
 ``L_w @ b`` raised ``ValueError: matmul: size N is different from K``.
 
-Audit 2026-05-10 D.1 flagged this class as having no dedicated tests. The
-suite below closes that gap and locks in the post-fix invariants:
+v0.25.0 closed the bug class statically: ``neighborhoods``, ``points``,
+``delta`` are required ctor kwargs; the legacy fallback to
+``op.get_derivative_weights()`` was deleted. There is no longer a way to
+construct a stencil object that silently drifts from runtime neighborhoods.
 
-1. Legacy path (neighborhoods=None) reproduces pre-fix behaviour.
-2. Required-arg validation: neighborhoods= without points/delta raises.
-3. Matched-indices path: neighborhoods= with same indices as op produces
-   equivalent stencils to the legacy path (M-matrix property preserved).
-4. Enlarged-stencil path: neighborhoods= with strictly larger index sets
-   produces L_w whose length matches the enlarged stencil. This is the
-   load-bearing property that resolves #1102.
-5. Integration regression: HJBGFDMSolver with adaptive_neighborhoods=True
-   and monotonicity_scheme="qp_m_matrix" completes construction without
-   the precompute-vs-runtime shape mismatch firing.
+This suite locks in the v0.25.0 invariants:
+
+1. Required-arg gate: missing ``neighborhoods=`` / ``points=`` / ``delta=``
+   raises ``TypeError`` at construction (no silent legacy fallback).
+2. Matched-indices path: stencils built on op-equivalent indices produce
+   M-matrix-compliant weights.
+3. Enlarged-stencil path: ``neighborhoods[i]`` strictly larger than the
+   op default produces ``L_w`` of the enlarged length (load-bearing #1102
+   invariant).
+4. Integration regression: HJBGFDMSolver with ``adaptive_neighborhoods=True``
+   and ``monotonicity_scheme="qp_m_matrix"`` constructs end-to-end.
 """
 
 from __future__ import annotations
@@ -35,184 +38,109 @@ from mfgarchon.alg.numerical.gfdm_components.precomputed_stencils import (
     PrecomputedMonotoneStencils,
 )
 
-# ---------------------------------------------------------------------------
-# Minimal mock TaylorOperator — enough to drive _precompute legacy path.
-# Mirrors the dict shape returned by TaylorOperator.get_derivative_weights.
-# ---------------------------------------------------------------------------
-
-
-class _MockTaylorOperator:
-    def __init__(self, points: np.ndarray, neighborhoods: dict, delta: float):
-        """Build a stand-in operator with Wendland-LSQ unconstrained weights
-        at each point, matching the post-filter neighborhoods.
-        """
-        from mfgarchon.alg.numerical.gfdm_components.joint_socp import (
-            build_taylor_matrix_1d,
-            build_taylor_matrix_2d,
-            wendland_stencil_weights,
-        )
-
-        self.points = points
-        self.dimension = points.shape[1] if points.ndim == 2 else 1
-        self._weights_cache: dict[int, dict] = {}
-        for i, nh in neighborhoods.items():
-            nbr = np.asarray(nh["indices"])
-            offsets = points[nbr] - points[i]
-            if self.dimension == 1:
-                offsets_1d = offsets.reshape(-1)
-                A, _ = build_taylor_matrix_1d(offsets_1d)
-                w = wendland_stencil_weights(offsets_1d, delta)
-                e_lap = np.array([0.0, 0.0, 1.0])
-            else:
-                A, _ = build_taylor_matrix_2d(offsets)
-                w = wendland_stencil_weights(offsets, delta)
-                e_lap = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 1.0])
-            W = np.diag(w)
-            ATA = A.T @ W @ A
-            try:
-                coeffs = np.linalg.solve(ATA, e_lap)
-                lap = (W @ A) @ coeffs
-            except np.linalg.LinAlgError:
-                lap = np.zeros(len(nbr))
-            center_in = int(np.where(nbr == i)[0][0]) if i in nbr.tolist() else -1
-            self._weights_cache[int(i)] = {
-                "neighbor_indices": nbr,
-                "lap_weights": lap,
-                "center_idx_in_neighbors": center_in,
-            }
-
-    def get_derivative_weights(self, point_idx: int) -> dict | None:
-        return self._weights_cache.get(int(point_idx))
-
 
 def _build_2d_grid_with_neighborhoods(nx: int = 5, ny: int = 5, delta: float = 1.5):
     """Construct a small 2D Cartesian cloud with k-NN-like neighborhoods.
 
     All boundary points share the same fixed neighbor count, simulating
-    the pre-adaptive op state. Returns (points, op_neighborhoods, boundary_mask).
+    the pre-adaptive op state. Returns (points, neighborhoods, boundary_mask).
     """
+    from scipy.spatial import cKDTree
+
     xs = np.linspace(0.0, float(nx - 1), nx)
     ys = np.linspace(0.0, float(ny - 1), ny)
     pts = np.array([[x, y] for x in xs for y in ys])
     n = len(pts)
-    # k-NN with k=8 — every point has 8 closest neighbors plus itself.
-    from scipy.spatial import cKDTree
-
     tree = cKDTree(pts)
-    op_nh: dict[int, dict] = {}
+    nh: dict[int, dict] = {}
     for i in range(n):
         _, idx = tree.query(pts[i], k=9)  # includes self
-        op_nh[i] = {"indices": np.asarray(idx, dtype=int)}
-    # Boundary mask: outermost ring
+        nh[i] = {"indices": np.asarray(idx, dtype=int)}
     is_boundary = np.zeros(n, dtype=bool)
     for i, p in enumerate(pts):
         if p[0] in (xs[0], xs[-1]) or p[1] in (ys[0], ys[-1]):
             is_boundary[i] = True
-    return pts, op_nh, is_boundary
+    return pts, nh, is_boundary
 
 
 # ---------------------------------------------------------------------------
-# 1. Legacy path is unchanged
+# 1. Required-arg gate
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_path_unchanged_no_neighborhoods():
-    """neighborhoods=None falls back to op.get_derivative_weights() (pre-#1102)."""
-    pts, op_nh, is_b = _build_2d_grid_with_neighborhoods()
-    op = _MockTaylorOperator(pts, op_nh, delta=1.5)
+def test_missing_neighborhoods_raises_type_error():
+    _, _, is_b = _build_2d_grid_with_neighborhoods()
+    with pytest.raises(TypeError):
+        PrecomputedMonotoneStencils(is_boundary=is_b)  # type: ignore[call-arg]
 
-    precomp = PrecomputedMonotoneStencils(operator=op, is_boundary=is_b, tolerance=1e-6)
+
+def test_missing_points_raises_type_error():
+    _, nh, is_b = _build_2d_grid_with_neighborhoods()
+    with pytest.raises(TypeError):
+        PrecomputedMonotoneStencils(is_boundary=is_b, neighborhoods=nh)  # type: ignore[call-arg]
+
+
+def test_missing_delta_raises_type_error():
+    pts, nh, is_b = _build_2d_grid_with_neighborhoods()
+    with pytest.raises(TypeError):
+        PrecomputedMonotoneStencils(is_boundary=is_b, neighborhoods=nh, points=pts)  # type: ignore[call-arg]
+
+
+def test_dimension_3d_rejected():
+    pts = np.random.default_rng(0).uniform(size=(20, 3))
+    is_b = np.zeros(20, dtype=bool)
+    is_b[:5] = True
+    nh = {i: {"indices": np.arange(20, dtype=int)} for i in range(20)}
+    with pytest.raises(ValueError, match="1D or 2D"):
+        PrecomputedMonotoneStencils(
+            is_boundary=is_b, neighborhoods=nh, points=pts, delta=1.5
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2. Matched-indices path: M-matrix property on op-equivalent stencil
+# ---------------------------------------------------------------------------
+
+
+def test_matched_neighborhoods_produces_m_matrix_compliant_stencils():
+    """neighborhoods matching the op's k-NN indices produces stencils
+    that are M-matrix compliant after QP (off-diagonals non-negative,
+    weights sum to zero modulo tolerance).
+    """
+    pts, nh, is_b = _build_2d_grid_with_neighborhoods()
+
+    precomp = PrecomputedMonotoneStencils(
+        is_boundary=is_b, neighborhoods=nh, points=pts, delta=1.5
+    )
 
     assert precomp.stats["n_boundary"] == int(is_b.sum())
     for i in np.where(is_b)[0]:
-        sd = precomp.stencils.get(int(i))
-        assert sd is not None, f"Missing stencil at boundary point {i}"
-        # Legacy stencil indices come from op directly.
-        assert np.array_equal(sd.neighbor_indices, op_nh[int(i)]["indices"])
+        i = int(i)
+        sd = precomp.stencils.get(i)
+        assert sd is not None, f"missing stencil at boundary point {i}"
+        # Same indices as the supplied neighborhoods.
+        assert np.array_equal(sd.neighbor_indices, nh[i]["indices"])
+        # M-matrix invariants.
+        if sd.center_in_neighbors is not None:
+            off = np.delete(sd.weights, sd.center_in_neighbors)
+            assert np.all(off >= -1e-6), f"point {i}: off-diagonal weights negative"
+            assert abs(np.sum(sd.weights)) < 1e-6, f"point {i}: weights do not sum to zero"
 
 
 # ---------------------------------------------------------------------------
-# 2. Required-arg validation
-# ---------------------------------------------------------------------------
-
-
-def test_neighborhoods_without_points_raises():
-    pts, op_nh, is_b = _build_2d_grid_with_neighborhoods()
-    op = _MockTaylorOperator(pts, op_nh, delta=1.5)
-    with pytest.raises(ValueError, match="points= and delta= are also required"):
-        PrecomputedMonotoneStencils(operator=op, is_boundary=is_b, neighborhoods=op_nh)
-
-
-def test_neighborhoods_without_delta_raises():
-    pts, op_nh, is_b = _build_2d_grid_with_neighborhoods()
-    op = _MockTaylorOperator(pts, op_nh, delta=1.5)
-    with pytest.raises(ValueError, match="points= and delta= are also required"):
-        PrecomputedMonotoneStencils(operator=op, is_boundary=is_b, neighborhoods=op_nh, points=pts)
-
-
-# ---------------------------------------------------------------------------
-# 3. Matched-indices: neighborhoods= with same indices as op produces
-#    M-matrix-compliant stencils on the same indices.
-# ---------------------------------------------------------------------------
-
-
-def test_matched_neighborhoods_produces_equivalent_stencils():
-    """When neighborhoods== matches op's indices, both paths produce stencils
-    on the same indices and both satisfy the M-matrix property after QP.
-
-    Bit-exact equality is not asserted: the Wendland-LSQ recomputation in
-    the new path may differ from op's stored unconstrained weights by the
-    LSQ-conditioning of the operator (different SVD truncation/conditioning
-    paths). The load-bearing invariant is: same indices, M-matrix-compliant.
-    """
-    pts, op_nh, is_b = _build_2d_grid_with_neighborhoods()
-    op = _MockTaylorOperator(pts, op_nh, delta=1.5)
-
-    legacy = PrecomputedMonotoneStencils(operator=op, is_boundary=is_b)
-    fresh = PrecomputedMonotoneStencils(
-        operator=op,
-        is_boundary=is_b,
-        neighborhoods=op_nh,
-        points=pts,
-        delta=1.5,
-    )
-
-    assert legacy.stats["n_boundary"] == fresh.stats["n_boundary"]
-    for i in np.where(is_b)[0]:
-        sd_l = legacy.stencils.get(int(i))
-        sd_f = fresh.stencils.get(int(i))
-        assert sd_l is not None
-        assert sd_f is not None
-        # Same stencil indices.
-        assert np.array_equal(sd_l.neighbor_indices, sd_f.neighbor_indices), (
-            f"point {i}: indices differ between legacy and fresh path"
-        )
-        # M-matrix property holds in fresh path (sum-to-zero and off-diagonal
-        # non-negative — modulo tolerance).
-        if sd_f.center_in_neighbors is not None:
-            off = np.delete(sd_f.weights, sd_f.center_in_neighbors)
-            assert np.all(off >= -1e-6), f"point {i}: fresh path off-diagonal weights have negative entries"
-            assert abs(np.sum(sd_f.weights)) < 1e-6, f"point {i}: fresh path weights do not sum to zero"
-
-
-# ---------------------------------------------------------------------------
-# 4. Enlarged stencil: post-adaptive indices strictly larger than op
+# 3. Enlarged stencil: post-adaptive indices strictly larger than k-NN
 # ---------------------------------------------------------------------------
 
 
 def test_enlarged_neighborhoods_produces_correct_length_weights():
-    """When neighborhoods[i] has strictly more indices than op (simulating
-    adaptive δ-enlargement), L_w must have the enlarged length and remain
-    M-matrix compliant after QP. This is the property that fails pre-#1102.
+    """When neighborhoods[i] has strictly more indices than the k-NN default
+    (simulating adaptive δ-enlargement), L_w must have the enlarged length
+    and remain M-matrix compliant after QP. This is the load-bearing #1102
+    invariant: precomp L_w aligns with runtime b = u_neighbors - u_center.
     """
-    pts, op_nh, is_b = _build_2d_grid_with_neighborhoods()
-    op = _MockTaylorOperator(pts, op_nh, delta=1.5)
-
-    # Simulate adaptive enlargement: at each boundary point, take all points
-    # within radius 2.5*delta instead of k=8. Strictly enlarges every
-    # boundary stencil for this small grid.
     from scipy.spatial import cKDTree
 
+    pts, base_nh, is_b = _build_2d_grid_with_neighborhoods()
     tree = cKDTree(pts)
     enlarged_nh: dict[int, dict] = {}
     for i in range(len(pts)):
@@ -220,38 +148,32 @@ def test_enlarged_neighborhoods_produces_correct_length_weights():
         enlarged_nh[i] = {"indices": idx}
 
     precomp = PrecomputedMonotoneStencils(
-        operator=op,
-        is_boundary=is_b,
-        neighborhoods=enlarged_nh,
-        points=pts,
-        delta=1.5,
+        is_boundary=is_b, neighborhoods=enlarged_nh, points=pts, delta=1.5
     )
 
     for i in np.where(is_b)[0]:
         i = int(i)
         sd = precomp.stencils.get(i)
-        assert sd is not None, f"Missing stencil at boundary point {i}"
+        assert sd is not None, f"missing stencil at boundary point {i}"
         n_enlarged = len(enlarged_nh[i]["indices"])
-        n_legacy = len(op_nh[i]["indices"])
-        # Sanity check on the test fixture: enlargement must actually enlarge.
-        assert n_enlarged > n_legacy, (
-            f"Test fixture broken at point {i}: r=3 not larger than k=8 ({n_enlarged} <= {n_legacy})"
+        n_base = len(base_nh[i]["indices"])
+        assert n_enlarged > n_base, (
+            f"test fixture broken at point {i}: r=3 not larger than k=8 "
+            f"({n_enlarged} <= {n_base})"
         )
-        # The fix: weights and indices share the enlarged length.
         assert len(sd.weights) == n_enlarged, (
             f"point {i}: L_w length {len(sd.weights)} != enlarged stencil "
-            f"length {n_enlarged}. This is the #1102 shape-mismatch invariant."
+            f"length {n_enlarged}. #1102 invariant violated."
         )
         assert len(sd.neighbor_indices) == n_enlarged
-        # M-matrix invariants still hold on the enlarged stencil.
         if sd.center_in_neighbors is not None:
             off = np.delete(sd.weights, sd.center_in_neighbors)
-            assert np.all(off >= -1e-6), f"point {i}: enlarged-stencil weights violate M-matrix off-diagonal"
-            assert abs(np.sum(sd.weights)) < 1e-6, f"point {i}: enlarged-stencil weights do not sum to zero"
+            assert np.all(off >= -1e-6), f"point {i}: enlarged off-diagonals negative"
+            assert abs(np.sum(sd.weights)) < 1e-6, f"point {i}: enlarged weights do not sum to zero"
 
 
 # ---------------------------------------------------------------------------
-# 5. Integration regression — HJBGFDMSolver path
+# 4. Integration regression — HJBGFDMSolver path
 # ---------------------------------------------------------------------------
 
 
@@ -286,22 +208,14 @@ class _MockProblem:
 def test_solver_constructs_with_adaptive_neighborhoods_and_qp_m_matrix():
     """HJBGFDMSolver(adaptive_neighborhoods=True, monotonicity_scheme="qp_m_matrix")
     must complete construction including the PrecomputedMonotoneStencils
-    initialisation, without runtime/precomp size mismatch.
-
-    The crash mode pre-#1102 is at the runtime override site
-    (``approximate_derivatives``); the fix here ensures L_w is built on
-    the same stencil the runtime sees, removing the shape mismatch by
-    construction. This test exercises the construction path; the
-    runtime contraction is exercised by the call from ``_make_solver``
-    setting up Taylor matrices end-to-end.
+    initialisation, without runtime/precomp size mismatch. Locks in the
+    end-to-end #1102 fix.
     """
     from mfgarchon.alg.numerical.hjb_solvers.hjb_gfdm import HJBGFDMSolver
     from mfgarchon.geometry import Hyperrectangle
     from mfgarchon.geometry.boundary import BCSegment, BCType, BoundaryConditions
 
     LX, LY = 6.0, 6.0
-    # Irregular cloud: small jitter to make adaptive enlargement bite at
-    # some corner buffer points without being too pathological.
     rng = np.random.default_rng(0)
     nx, ny = 7, 7
     xs = np.linspace(0.0, LX, nx)
@@ -353,10 +267,6 @@ def test_solver_constructs_with_adaptive_neighborhoods_and_qp_m_matrix():
             monotonicity_application="precompute",
         )
 
-    # Construction succeeded. Now verify the load-bearing invariant: for
-    # every precomputed stencil, the stored weights length matches the
-    # runtime neighborhood length. Pre-#1102 these diverged at adaptive-
-    # enlarged points and the runtime override would raise.
     precomp = s._precomputed_stencils
     assert precomp is not None, "qp_m_matrix + precompute should build stencils"
     for i, sd in precomp.stencils.items():

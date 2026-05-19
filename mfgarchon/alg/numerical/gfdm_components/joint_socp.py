@@ -460,8 +460,6 @@ class PrecomputedJointSocpStencils:
 
     Parameters
     ----------
-    operator : TaylorOperator
-        GFDM operator with computed stencil neighborhoods.
     points : np.ndarray
         Collocation points, shape (n_total, dimension).
     interior_indices : np.ndarray
@@ -472,6 +470,11 @@ class PrecomputedJointSocpStencils:
     delta : float
         Wendland kernel support radius. Used for distance-weighted SOCP
         objective via `wendland_stencil_weights`.
+    neighborhoods : dict
+        Post-filter stencil dict (typically ``HJBGFDMSolver.neighborhoods``
+        built by ``NeighborhoodBuilder``). Single source of truth: stencils
+        always trace to these indices (Issue #1102 dual-source bug class —
+        legacy fallback to ``op.get_derivative_weights()`` removed in v0.25.0).
     cone_constant_C : float
         Per-edge cone bound: ||D_{ij}||_2 <= C * h_i * L_{ij}. Default 1.0
         (within the paper's $C_\\star \\in [0.5, 1]$ feasibility range for
@@ -490,13 +493,12 @@ class PrecomputedJointSocpStencils:
 
     def __init__(
         self,
-        operator,
         points: np.ndarray,
         interior_indices: np.ndarray,
         delta: float,
+        neighborhoods: dict,
         cone_constant_C: float = 1.0,
         eps_pos: float = 0.0,
-        neighborhoods: dict | None = None,
         cone_constant_C_max: float | None = None,
         cone_constant_C_growth: float = 2.0,
         use_relaxed_fallback: bool = False,
@@ -505,15 +507,21 @@ class PrecomputedJointSocpStencils:
     ):
         if not _CVXPY_AVAILABLE:
             raise ImportError("cvxpy is required for joint SOCP. Install with: pip install cvxpy")
-        self._operator = operator
+        # Single source of truth: neighborhoods + points + delta. With the
+        # legacy `op.get_derivative_weights()` fallback removed in v0.25.0,
+        # the TaylorOperator reference is unused; constructor no longer takes one.
         self._points = np.asarray(points)
         self._interior_indices = np.asarray(interior_indices)
         self._delta = float(delta)
         self._C = float(cone_constant_C)
         self._eps_pos = float(eps_pos)
-        # Post-filter neighborhoods (after visibility filter, ghost nodes, LCR).
-        # See class docstring for why this is required for correctness on
-        # irregular clouds where the visibility filter modifies stencils.
+        # Single source of truth: stencils always trace to the supplied
+        # post-filter neighborhoods (after visibility filter, ghost nodes,
+        # adaptive δ-enlargement). The legacy fallback to
+        # `op.get_derivative_weights()` was removed in v0.25.0 — it silently
+        # produced wrong results on irregular clouds where the visibility
+        # filter / adaptive enlargement modified runtime stencils
+        # (Issue #1102 dual-source bug class).
         self._neighborhoods = neighborhoods
         # Per-stencil C-bisection cap. None disables bisection.
         # When set, infeasible stencils retry with C *= cone_constant_C_growth
@@ -555,27 +563,16 @@ class PrecomputedJointSocpStencils:
 
         for i in self._interior_indices:
             i = int(i)
-            if self._neighborhoods is not None:
-                # Use post-filter neighborhood (matches runtime exactly).
-                nh = self._neighborhoods.get(int(i))
-                if nh is None:
-                    continue
-                nbr = np.asarray(nh["indices"])
-                # Locate center index `i` within the neighbor list (post-filter
-                # neighborhoods include the center as one of the entries — this
-                # is the convention of `NeighborhoodBuilder`).
-                center_match = np.where(nbr == int(i))[0]
-                if len(center_match) == 0:
-                    continue
-                center_in_nbr = int(center_match[0])
-            else:
-                dw = self._operator.get_derivative_weights(i)
-                if dw is None:
-                    continue
-                nbr = dw["neighbor_indices"]
-                center_in_nbr = dw["center_idx_in_neighbors"]
-                if center_in_nbr < 0:
-                    continue
+            # Post-filter neighborhood (matches runtime exactly).
+            # NeighborhoodBuilder convention: center index is one of the entries.
+            nh = self._neighborhoods.get(int(i))
+            if nh is None:
+                continue
+            nbr = np.asarray(nh["indices"])
+            center_match = np.where(nbr == int(i))[0]
+            if len(center_match) == 0:
+                continue
+            center_in_nbr = int(center_match[0])
 
             offsets = self._points[nbr] - self._points[i]
             offsets_for_taylor = offsets.reshape(-1) if self._dimension == 1 and offsets.ndim == 2 else offsets

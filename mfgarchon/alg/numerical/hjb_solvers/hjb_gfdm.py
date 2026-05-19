@@ -918,19 +918,12 @@ class HJBGFDMSolver(BaseHJBSolver):
 
             interior_indices = np.setdiff1d(np.arange(self.n_points), self.boundary_indices)
             self._joint_socp_stencils = PrecomputedJointSocpStencils(
-                operator=self._gfdm_operator,
                 points=self.collocation_points,
                 interior_indices=interior_indices,
                 delta=delta,
+                neighborhoods=self.neighborhoods,
                 cone_constant_C=8.0,  # higher C → cone less binding, picks fast-path Wendland-LSQ where M-matrix holds
                 eps_pos=0.0,
-                # Pass post-filter neighborhoods so SOCP weights are defined on
-                # the same stencil runtime uses to build `b` at the override
-                # site (`approximate_derivatives` line ~1675). Required to make
-                # the override correct on irregular clouds where the visibility
-                # filter (or ghost-node augmentation) modifies stencil indices
-                # between operator and `self.neighborhoods`.
-                neighborhoods=self.neighborhoods,
                 # C-bisection: retry infeasible stencils with progressively
                 # larger C up to C_max. Most marginally infeasible stencils
                 # become feasible at C ∈ (1, 8].
@@ -983,18 +976,11 @@ class HJBGFDMSolver(BaseHJBSolver):
             is_buffer = np.zeros(self.n_points, dtype=bool)
             is_buffer[self.boundary_indices] = True
             self._precomputed_stencils = PrecomputedMonotoneStencils(
-                operator=self._gfdm_operator,
                 is_boundary=is_buffer,
-                tolerance=1e-6,
-                # Issue #1102: pass post-filter neighborhoods so the M-matrix
-                # QP runs on the same stencil indices the override site sees
-                # at runtime. Without this, adaptive_neighborhoods=True (or
-                # ghost-node augmentation) silently desynchronises L_w
-                # (pre-adaptive, from op) from b = u_neighbors - u_center
-                # (post-adaptive, from self.neighborhoods).
                 neighborhoods=self.neighborhoods,
                 points=self.collocation_points,
                 delta=delta,
+                tolerance=1e-6,
             )
             logger.info(
                 f"Precomputed monotone stencils: {self._precomputed_stencils.stats['n_monotonized']}/{self._precomputed_stencils.stats['n_boundary']} "

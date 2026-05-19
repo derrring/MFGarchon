@@ -155,6 +155,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PR — that cluster requires migrating ~20 mfg-research scripts that pass
   `qp_optimization_level=` directly.
 
+- **`PrecomputedMonotoneStencils` / `PrecomputedJointSocpStencils` legacy
+  ctor signature** (Issue #1102, dual-source stencil bug class). The
+  `operator: TaylorOperator` parameter is removed; `neighborhoods=`,
+  `points=`, `delta=` (for `PrecomputedMonotoneStencils`) and
+  `neighborhoods=` (for `PrecomputedJointSocpStencils`) are now required
+  kwargs. The legacy fallback path that read pre-adaptive
+  `op.get_derivative_weights()` / `op.get_neighborhood()` is deleted.
+
+  Motivation: the bug class recurred twice (#1099 → JointSocp,
+  #1102/#1121 → Monotone). Both incidents were the same shape: stencil
+  weights computed against pre-adaptive `op.neighborhoods`, contracted at
+  runtime against `b = u_neighbors - u_center` built from post-adaptive
+  `NeighborhoodBuilder.neighborhoods`, raising
+  `ValueError: matmul: size N is different from K` at corner buffer
+  points where adaptive-δ enlargement modified the stencil. After this
+  change the bug class is statically impossible: there is no way to
+  construct a stencil object that silently drifts from runtime
+  neighborhoods.
+
+  Migration (production callers — already done in
+  `HJBGFDMSolver.__init__` lines 920, 978):
+  ```python
+  # before (v0.24)
+  PrecomputedMonotoneStencils(operator=op, is_boundary=mask, ...)
+  PrecomputedJointSocpStencils(operator=op, points=pts, interior_indices=..., delta=δ, ...)
+
+  # after (v0.25.0)
+  PrecomputedMonotoneStencils(is_boundary=mask, neighborhoods=nh, points=pts, delta=δ)
+  PrecomputedJointSocpStencils(points=pts, interior_indices=..., delta=δ, neighborhoods=nh, ...)
+  ```
+
+  Tests at `tests/unit/test_alg/test_precomputed_monotone_stencils.py`
+  rewritten: legacy-path test deleted, TypeError gates added for each
+  required kwarg, matched + enlarged paths kept, integration regression
+  unchanged. 7/7 pass.
+
 ### Fixed
 
 - **`PrecomputedMonotoneStencils` accepts `neighborhoods=` parameter**
